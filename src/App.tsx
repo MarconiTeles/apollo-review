@@ -41,6 +41,7 @@ export default function App() {
         attachmentId: p.get("att") ?? "",
         commentId: p.get("cmt") ?? null,
         uploaderId: p.get("up") ? Number(p.get("up")) : null,
+        uploaderName: p.get("un") ?? null,
         status: "in_review",
         summaryText: "",
         mediaUrl: media,

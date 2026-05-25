@@ -186,11 +186,17 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
     const z = await encodeInlinePayload(out);
     const base = window.location.origin + window.location.pathname.replace(/index\.html$/, "");
     const viewerLink = `${base}?z=${z}`;
-    // Rich comment: analysis + a clean "VER REVIEW" hyperlink.
-    const segments = [
-      { text: `${out.summaryText}\n\n▶ ` },
-      { text: "VER REVIEW", attributes: { link: viewerLink } },
-    ];
+    // Rich comment: an optional real @mention (type:"tag" + user.id — the form
+    // that actually notifies + renders the chip; a plain "@name" pings nobody),
+    // the analysis, then a clean "VER REVIEW" hyperlink.
+    const segments: Array<Record<string, unknown>> = [];
+    if (out.uploaderId) {
+      const name = out.uploaderName ? `@${out.uploaderName}` : "@";
+      segments.push({ text: name, type: "tag", user: { id: out.uploaderId } });
+      segments.push({ text: "\n" });
+    }
+    segments.push({ text: `${out.summaryText}\n\n▶ ` });
+    segments.push({ text: "VER REVIEW", attributes: { link: viewerLink } });
     const pasteText = `${out.summaryText}\n\n▶ VER REVIEW: ${viewerLink}`;
 
     // PRIMARY: post straight to ClickUp through the proxy (no Apollo needed).

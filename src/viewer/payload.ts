@@ -10,6 +10,7 @@ export interface ReviewPayload {
   attachmentId: string;
   commentId?: string | null;
   uploaderId?: number | null;
+  uploaderName?: string | null; // for the @mention chip's fallback text
   status: string; // in_review | changes_requested | approved
   summaryText: string;
   mediaUrl: string;
