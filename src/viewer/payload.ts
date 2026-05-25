@@ -32,6 +32,28 @@ export async function decodeInlinePayload(z: string): Promise<ReviewPayload> {
   return JSON.parse(new TextDecoder().decode(jsonBytes)) as ReviewPayload;
 }
 
+/** Encode a review payload for an inline `?z=` link (zlib + base64url), the
+ *  inverse of decodeInlinePayload. Matches ReviewKit's ReviewHandoff so the
+ *  link opens in both the web viewer and Apollo's native reopen. */
+export async function encodeInlinePayload(payload: ReviewPayload): Promise<string> {
+  const json = new TextEncoder().encode(JSON.stringify(payload));
+  const packed = await deflate(json);
+  return bytesToB64url(packed);
+}
+
+async function deflate(bytes: Uint8Array): Promise<Uint8Array> {
+  const stream = new Blob([bytes as BlobPart])
+    .stream()
+    .pipeThrough(new CompressionStream("deflate")); // zlib (RFC 1950)
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function bytesToB64url(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 function b64urlToBytes(s: string): Uint8Array {
   let b64 = s.replace(/-/g, "+").replace(/_/g, "/");
   while (b64.length % 4) b64 += "=";

@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import Viewer from "./viewer/Viewer";
+import Editor from "./viewer/Editor";
 import { decodeInlinePayload, type ReviewPayload } from "./viewer/payload";
 import "./App.css";
 
 type LoadState =
   | { phase: "idle" }
   | { phase: "loading" }
-  | { phase: "ready"; payload: ReviewPayload }
+  | { phase: "ready"; payload: ReviewPayload; edit: boolean }
   | { phase: "error"; message: string };
 
 export default function App() {
@@ -19,8 +20,8 @@ export default function App() {
     const url = p.get("d") || p.get("data"); // legacy: fetch a JSON URL
 
     let cancelled = false;
-    const ok = (payload: ReviewPayload) => {
-      if (!cancelled) setState({ phase: "ready", payload });
+    const ok = (payload: ReviewPayload, edit = false) => {
+      if (!cancelled) setState({ phase: "ready", payload, edit });
     };
     const fail = (e: unknown) => {
       if (!cancelled)
@@ -34,7 +35,7 @@ export default function App() {
       setState({ phase: "loading" });
       decodeInlinePayload(inline).then(ok).catch(fail);
     } else if (media) {
-      // Fresh review of a file: no payload yet, just the media + context.
+      // Fresh review of a file → open the EDITOR (no payload yet, just media).
       ok({
         taskId: p.get("task") ?? "",
         attachmentId: p.get("att") ?? "",
@@ -45,7 +46,7 @@ export default function App() {
         ext: p.get("x") ?? media.split(".").pop() ?? "",
         mediaTitle: p.get("t") ?? "Arquivo",
         comments: [],
-      });
+      }, true);
     } else if (url) {
       setState({ phase: "loading" });
       fetch(url)
@@ -63,7 +64,8 @@ export default function App() {
     };
   }, []);
 
-  if (state.phase === "ready") return <Viewer payload={state.payload} />;
+  if (state.phase === "ready")
+    return state.edit ? <Editor payload={state.payload} /> : <Viewer payload={state.payload} />;
 
   return (
     <div className="vw-splash">
