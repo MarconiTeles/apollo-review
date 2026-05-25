@@ -42,9 +42,12 @@ export async function encodeInlinePayload(payload: ReviewPayload): Promise<strin
 }
 
 async function deflate(bytes: Uint8Array): Promise<Uint8Array> {
+  // RAW deflate (RFC 1951) — matches Apple's NSData.compressed(.zlib), which is
+  // raw deflate despite the name (NOT the zlib RFC 1950 wrapper). Using "deflate"
+  // here would add a zlib header that ReviewKit's ReviewHandoff can't decode.
   const stream = new Blob([bytes as BlobPart])
     .stream()
-    .pipeThrough(new CompressionStream("deflate")); // zlib (RFC 1950)
+    .pipeThrough(new CompressionStream("deflate-raw"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
@@ -64,8 +67,9 @@ function b64urlToBytes(s: string): Uint8Array {
 }
 
 async function inflate(bytes: Uint8Array): Promise<Uint8Array> {
-  // Swift encodes with NSData.compressed(.zlib) = zlib (RFC 1950) → "deflate".
-  for (const fmt of ["deflate", "deflate-raw", "gzip"] as const) {
+  // Swift's NSData.compressed(.zlib) is RAW deflate (RFC 1951) → "deflate-raw"
+  // first; keep "deflate"/"gzip" as fallbacks for older/other encoders.
+  for (const fmt of ["deflate-raw", "deflate", "gzip"] as const) {
     try {
       const stream = new Blob([bytes as BlobPart])
         .stream()

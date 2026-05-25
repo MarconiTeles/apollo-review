@@ -39,6 +39,7 @@ export default function App() {
       ok({
         taskId: p.get("task") ?? "",
         attachmentId: p.get("att") ?? "",
+        commentId: p.get("cmt") ?? null,
         uploaderId: p.get("up") ? Number(p.get("up")) : null,
         status: "in_review",
         summaryText: "",

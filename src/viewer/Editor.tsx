@@ -33,18 +33,24 @@ interface Draft {
   points: { x: number; y: number }[];
 }
 
+// Serverless proxy that posts the review comment to ClickUp (see
+// worker/clickup-proxy.js). Empty until deployed → "Concluir" falls back to a
+// copy/paste. Set this to the deployed Worker URL to post directly to ClickUp.
+const WORKER_URL = "https://apollo-review-proxy.marconimpn.workers.dev";
+
 export default function Editor({ payload }: { payload: ReviewPayload }) {
   const kind = mediaKindFor(payload.ext);
   const timed = kind === "video" || kind === "audio";
 
-  const [tool, setTool] = useState<Tool>("rect");
+  const [tool, setTool] = useState<Tool>("select");
   const [color, setColor] = useState(COLORS[0]);
   const [status, setStatus] = useState(payload.status || "in_review");
   const [currentMs, setCurrentMs] = useState(0);
   const [comments, setComments] = useState<ReviewComment[]>(payload.comments ?? []);
   const [pending, setPending] = useState<Annotation[]>([]);
   const [body, setBody] = useState("");
-  const [done, setDone] = useState<string | null>(null); // the comment text to paste
+  const [done, setDone] = useState<string | null>(null); // paste fallback text ("" when posted)
+  const [postedOk, setPostedOk] = useState(false);        // true when the proxy posted to ClickUp
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -174,15 +180,37 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
     }
   };
 
-  // ── Finish → build the VER REVIEW link + paste text ────────────────────
+  // ── Finish → POST directly to ClickUp via the serverless proxy ─────────
   const finish = async () => {
-    const out: ReviewPayload = { ...payload, status, comments, summaryText: summarize(comments, status) };
+    const out: ReviewPayload = { ...payload, status, comments, summaryText: summarize(comments, status, payload.mediaTitle) };
     const z = await encodeInlinePayload(out);
     const base = window.location.origin + window.location.pathname.replace(/index\.html$/, "");
-    const link = `${base}?z=${z}`;
-    const text = `${out.summaryText}\n\n▶ VER REVIEW: ${link}`;
-    setDone(text);
-    try { await navigator.clipboard.writeText(text); } catch { /* user can copy manually */ }
+    const viewerLink = `${base}?z=${z}`;
+    // Rich comment: analysis + a clean "VER REVIEW" hyperlink.
+    const segments = [
+      { text: `${out.summaryText}\n\n▶ ` },
+      { text: "VER REVIEW", attributes: { link: viewerLink } },
+    ];
+    const pasteText = `${out.summaryText}\n\n▶ VER REVIEW: ${viewerLink}`;
+
+    // PRIMARY: post straight to ClickUp through the proxy (no Apollo needed).
+    if (WORKER_URL && out.taskId) {
+      try {
+        const r = await fetch(WORKER_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ taskId: out.taskId, segments, assignee: out.uploaderId ?? undefined }),
+        });
+        const data = await r.json();
+        if (r.ok && data.ok) { setPostedOk(true); setDone(""); return; }
+      } catch {
+        /* fall through to paste */
+      }
+    }
+    // FALLBACK (proxy not configured yet): a paste-able comment.
+    setPostedOk(false);
+    setDone(pasteText);
+    try { await navigator.clipboard.writeText(pasteText); } catch { /* manual copy */ }
   };
 
   const ordered = useMemo(() => {
@@ -281,10 +309,18 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
         <div className="ed-modal" onClick={() => setDone(null)}>
           <div className="ed-modal-card" onClick={(e) => e.stopPropagation()}>
             <span className="vw-brand">Review concluído</span>
-            <p className="vw-muted">Copiado! Cole como comentário na tarefa do ClickUp:</p>
-            <textarea className="ed-done" readOnly value={done} rows={6} onFocus={(e) => e.currentTarget.select()} />
+            {postedOk ? (
+              <p className="vw-muted">✓ Comentário postado no ClickUp.</p>
+            ) : (
+              <>
+                <p className="vw-muted">Copie e cole como comentário na tarefa do ClickUp:</p>
+                <textarea className="ed-done" readOnly value={done} rows={6} onFocus={(e) => e.currentTarget.select()} />
+              </>
+            )}
             <div className="ed-modal-actions">
-              <button className="ed-add" onClick={() => navigator.clipboard.writeText(done)}>Copiar de novo</button>
+              {!postedOk && (
+                <button className="ed-add" onClick={() => navigator.clipboard.writeText(done)}>Copiar de novo</button>
+              )}
               <button className="ed-clear" onClick={() => setDone(null)}>Fechar</button>
             </div>
           </div>
@@ -330,12 +366,14 @@ function fmt(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-function summarize(comments: ReviewComment[], status: string): string {
+function summarize(comments: ReviewComment[], status: string, title: string): string {
   const total = comments.length;
   const resolved = comments.filter((c) => c.resolved).length;
   const label = status === "approved" ? "Aprovado"
     : status === "changes_requested" ? "Pede alterações" : "Em revisão";
-  const lines = [`📝 Review (${label}) — ${total} comentário(s), ${resolved} resolvido(s):`];
+  const lines: string[] = [];
+  if (title) lines.push(title); // filename first, before anything else
+  lines.push(`📝 Review (${label}) — ${total} comentário(s), ${resolved} resolvido(s):`);
   for (const c of comments) {
     const mark = c.annotations.length ? " ✎" : "";
     lines.push(`• [${anchorLabel(c)}]${mark} ${c.body || "(marcação)"}`);

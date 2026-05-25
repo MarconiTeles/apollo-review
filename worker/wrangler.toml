@@ -1,0 +1,8 @@
+name = "apollo-review-proxy"
+main = "clickup-proxy.js"
+compatibility_date = "2026-05-25"
+
+# Set the ClickUp token (never committed) with:
+#   npx wrangler secret put CLICKUP_TOKEN
+# Then deploy:
+#   npx wrangler deploy
