@@ -18,6 +18,44 @@ export interface ReviewPayload {
   comments: ReviewComment[];
 }
 
+/** Decode an inline review payload carried in the URL (`?z=<gzip+base64url>`).
+ *  Mirrors ReviewKit's ReviewHandoff.encode (zlib + base64url). No network
+ *  fetch — so it works cross-origin (the ClickUp CDN doesn't send CORS). */
+export async function decodeInlinePayload(z: string): Promise<ReviewPayload> {
+  const packed = b64urlToBytes(z);
+  let jsonBytes: Uint8Array;
+  try {
+    jsonBytes = await inflate(packed);
+  } catch {
+    jsonBytes = packed; // wasn't compressed
+  }
+  return JSON.parse(new TextDecoder().decode(jsonBytes)) as ReviewPayload;
+}
+
+function b64urlToBytes(s: string): Uint8Array {
+  let b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4) b64 += "=";
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function inflate(bytes: Uint8Array): Promise<Uint8Array> {
+  // Swift encodes with NSData.compressed(.zlib) = zlib (RFC 1950) → "deflate".
+  for (const fmt of ["deflate", "deflate-raw", "gzip"] as const) {
+    try {
+      const stream = new Blob([bytes as BlobPart])
+        .stream()
+        .pipeThrough(new DecompressionStream(fmt));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch {
+      /* try next format */
+    }
+  }
+  throw new Error("inflate failed");
+}
+
 /** Derive the media kind from a file extension (no leading dot needed). */
 export function mediaKindFor(ext: string): MediaKind {
   const e = ext.toLowerCase().replace(/^\./, "");
