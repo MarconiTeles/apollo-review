@@ -17,7 +17,7 @@
       "authorClickupId": 1,
       "authorName": "Marconi",
       "body": "Ajustar o enquadramento aqui — sobra espaço em cima.",
-      "anchor": { "kind": "video", "timeMs": 2000 },
+      "anchor": { "kind": "video", "timeMs": 0, "endMs": 9000 },
       "parentId": null,
       "resolved": false,
       "annotations": [
