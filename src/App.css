@@ -11,6 +11,10 @@
   --accent: #c7321b;
   --ok: #3f7d4e;
   --warn: #b8791f;
+  /* Media stage — the dark well behind images / video. Kept dark in
+     BOTH themes (it's the viewing canvas), so it's a separate token
+     from --ink, which doubles as the text colour and flips in dark. */
+  --stage: #14130f;
 
   --serif: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -27,6 +31,32 @@
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
 body { background: var(--paper); }
+
+/* ── Dark mode ────────────────────────────────────────────────────────────
+   Follows the viewer's OS preference (matches Apollo's "Sistema" default).
+   Neutral charcoal scale anchored on Claude's app canvas (#1F1F1E) so the
+   review tool shares the same dark tone; the warm-white ink + cinnabar accent
+   carry the editorial character. The media `--stage` stays dark in both modes
+   and is intentionally NOT overridden here. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #1f1f1e;   /* canvas (= Claude bg) */
+    --page: #2a2a29;    /* surfaces: header, rail, cards */
+    --ink: #f3efe6;     /* warm-white body type */
+    --ink-soft: #b7b3aa;
+    --ink-faint: #87837a;
+    --line: #343432;    /* hairline separators on charcoal */
+    --accent: #e04a2e;  /* brighter cinnabar for dark */
+    --ok: #6fb585;
+    --warn: #d6b44c;
+    color: var(--ink);
+    background: var(--paper);
+  }
+  /* Faint cinnabar wash behind timestamps reads better a touch stronger. */
+  .vw-stamp { background: rgba(224, 74, 46, 0.16); }
+  /* PDF/doc iframe keeps a white page; soften the harsh white edge. */
+  .vw-doc { background: #fff; }
+}
 
 /* ── Splash / loading / error ─────────────────────────────────────────── */
 .vw-splash {
@@ -105,7 +135,7 @@ body { background: var(--paper); }
 .vw-stage {
   flex: 1;
   min-width: 0;
-  background: var(--ink);
+  background: var(--stage);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -269,7 +299,7 @@ body { background: var(--paper); }
 .ed-text:focus { outline: none; border-color: var(--accent); }
 .ed-add {
   margin-top: 8px; width: 100%; font: inherit; font-weight: 600; font-size: 13px;
-  color: #fff; background: var(--ink); border: 0; padding: 8px; border-radius: 8px; cursor: pointer;
+  color: var(--page); background: var(--ink); border: 0; padding: 8px; border-radius: 8px; cursor: pointer;
 }
 .ed-add:disabled { background: var(--ink-faint); cursor: default; }
 
