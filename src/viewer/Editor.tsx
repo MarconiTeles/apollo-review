@@ -159,6 +159,9 @@ export default function Editor({
   /// Loop toggle (⌃L) — when on, end-of-playback jumps back to
   /// `inMs ?? 0` and resumes, matching Swift PlayerModel.isLooping.
   const [isLooping, setIsLooping] = useState(false);
+  /// Floating markup toolbar visibility. Defaults closed — the
+  /// composer's inline ✎ button (and the P shortcut) toggles it.
+  const [markupOpen, setMarkupOpen] = useState(false);
   /// Mute state, mirrored to `videoRef.current.muted`.
   const [isMuted, setIsMuted] = useState(false);
   /// Forward playback speed (matches PlayerModel.speed). The shuttle
@@ -725,9 +728,15 @@ export default function Editor({
         case "f": case "F": toggleFullscreen(); e.preventDefault(); return;
         case "g": case "G": cycleGuide(); e.preventDefault(); return;
         case "p": case "P":
-          // Cursor ↔ last drawing tool toggle. Closest analogue to
-          // Swift's `anno.toggle()` since the web bar is always open.
-          setTool((t2) => (t2 === "select" ? "rect" : "select"));
+          // Toggle the floating markup toolbar (closest analogue to
+          // Swift `anno.toggle()`). Closing the toolbar reverts to
+          // the cursor so the canvas isn't left in a draw-on-click
+          // state.
+          setMarkupOpen((open) => {
+            const next = !open;
+            if (!next) setTool("select");
+            return next;
+          });
           e.preventDefault(); return;
         case "m": case "M": toggleMute(); e.preventDefault(); return;
         case "t": case "T": zoomFit(); e.preventDefault(); return;
@@ -900,10 +909,10 @@ export default function Editor({
       <div className="vw-body">
         <section className="vw-stage" ref={stageRef}>
           <div className="vw-stage-canvas" ref={stageBoxRef}>
-            {/* Markup toolbar — floats over the stage. Hidden in
-                read-only ("Ver review") so the reviewer can't pick
-                a tool / draw anything. */}
-            {!readOnly && (
+            {/* Markup toolbar — floats over the stage. Opened by the
+                inline ✎ in the composer (or the P key); hidden in
+                read-only ("Ver review"). */}
+            {!readOnly && markupOpen && (
               <div
                 ref={toolbarRef}
                 className="ed-toolbar ed-toolbar-floating"
@@ -1149,8 +1158,9 @@ export default function Editor({
               ))}
             </div>
             {/* Composer pinned to the bottom — matches Swift CommentRail.
-                Hidden in read-only ("Ver review") so the reviewer
-                can't add new notes to a posted review. */}
+                Buttons (markup-toolbar toggle + submit) live INSIDE
+                the bordered rounded box, Apollo-style: the whole row
+                reads as one input. Hidden in read-only. */}
             {!readOnly && (
               <div className="ed-composer">
                 <div className="ed-composer-row">
@@ -1168,16 +1178,32 @@ export default function Editor({
                     }}
                     rows={2}
                   />
-                  <button
-                    className="ed-add ed-add-compact"
-                    onClick={addComment}
-                    disabled={!body.trim() && pending.length === 0}
-                    title="Adicionar comentário (Enter)"
-                  >
-                    {(inMs !== null && outMs !== null && outMs > inMs)
-                      ? `${fmt(inMs)}–${fmt(outMs)}`
-                      : fmt(pendingFrameMs ?? currentMs)}
-                  </button>
+                  <div className="ed-composer-actions">
+                    <button
+                      type="button"
+                      className={`ed-comp-action${markupOpen ? " on" : ""}`}
+                      onClick={() => setMarkupOpen((v) => {
+                        const next = !v;
+                        if (!next) setTool("select");
+                        return next;
+                      })}
+                      title={markupOpen ? "Fechar barra de marcação (P)" : "Abrir barra de marcação (P)"}
+                      aria-label="Marcação"
+                    >
+                      <Icon name="markup-pen" />
+                    </button>
+                    <button
+                      type="button"
+                      className="ed-add ed-add-compact"
+                      onClick={addComment}
+                      disabled={!body.trim() && pending.length === 0}
+                      title="Adicionar comentário (Enter)"
+                    >
+                      {(inMs !== null && outMs !== null && outMs > inMs)
+                        ? `${fmt(inMs)}–${fmt(outMs)}`
+                        : fmt(pendingFrameMs ?? currentMs)}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1457,7 +1483,8 @@ type IconName =
   | "speaker" | "muted"
   | "zoom-in" | "zoom-out"
   | "aspect" | "fullscreen" | "help"
-  | "chevron-down";
+  | "chevron-down"
+  | "markup-pen";
 
 function Icon({ name }: { name: IconName }) {
   const common = { width: 14, height: 14, viewBox: "0 0 16 16", fill: "currentColor",
@@ -1523,6 +1550,14 @@ function Icon({ name }: { name: IconName }) {
     case "chevron-down":
       return <svg {...common} width="9" height="9" fill="none" strokeWidth="1.5">
         <path d="M3 6 L8 11 L13 6"/>
+      </svg>;
+    case "markup-pen":
+      // Pencil-tip in a circle — matches SF Symbols `pencil.tip.crop.circle`
+      // (the same glyph Apollo Swift uses on its header markup toggle).
+      return <svg {...common} fill="none" strokeWidth="1.3">
+        <circle cx="8" cy="8" r="6"/>
+        <path d="M6.6 9.4 L9.4 6.6 L10.6 7.8 L7.8 10.6 Z" fill="currentColor" stroke="none"/>
+        <path d="M9.4 6.6 L10.4 5.6 L11.4 6.6 L10.6 7.6" stroke="currentColor"/>
       </svg>;
   }
 }

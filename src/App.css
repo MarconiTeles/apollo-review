@@ -327,30 +327,68 @@ body { background: var(--paper); }
   min-height: 84px;              /* matches .ed-transport min-height */
   box-sizing: border-box;
 }
+/* The composer row IS the visible bordered input. The textarea has
+   its own border stripped — buttons live inline on the right, so
+   the whole row reads as one Apollo-style chip. */
 .ed-composer-row {
-  display: flex; align-items: stretch; gap: 6px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--page);
+  padding: 3px 4px 3px 0;
+  min-height: 38px;
+  transition: border-color 120ms;
 }
+.ed-composer-row:focus-within { border-color: var(--accent); }
 .ed-composer-row .ed-text {
   flex: 1; margin: 0;
-  min-height: 22px;              /* −35% (was 32) */
-  max-height: 54px;
+  min-height: 28px;
+  max-height: 110px;
   resize: none;
-  padding: 4px 9px;
+  padding: 5px 9px;
   font-size: 13px;
-  line-height: 1.3;
+  line-height: 1.35;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
 }
+.ed-composer-actions {
+  display: flex; align-items: center; gap: 2px;
+  flex-shrink: 0;
+}
+/* Inline icon button (e.g. markup-toolbar toggle). Transparent until
+   hover so the textarea reads as the primary surface. */
+.ed-comp-action {
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: 0; padding: 0;
+  border-radius: 6px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.ed-comp-action:hover { background: rgba(199, 50, 27, 0.10); color: var(--ink); }
+.ed-comp-action.on    { color: var(--accent); background: rgba(199, 50, 27, 0.12); }
+.ed-comp-action svg   { display: block; }
+
 .ed-composer-meta { display: flex; align-items: center; gap: 8px; margin-top: 4px; min-height: 14px; }
+
 /* Higher-specificity selector — `.ed-add` is declared further down
    with `width: 100%`, so without `.ed-add.ed-add-compact` the
    compact variant would lose the cascade and the button would
-   stretch to fill the composer. */
+   stretch to fill the composer. Sits flush with the markup-toggle
+   inside the same bordered row. */
 .ed-add.ed-add-compact {
   margin: 0; width: auto; flex-shrink: 0;
   font-family: var(--mono); font-size: 11px; font-weight: 600;
-  padding: 0 10px; line-height: 1;
-  min-width: 56px; max-width: 80px;
+  padding: 0 10px;
+  height: 28px;
+  line-height: 1;
+  min-width: 52px; max-width: 80px;
   white-space: nowrap;
-  align-self: stretch;
+  border-radius: 6px;
 }
 .ed-pending { font-size: 12px; color: var(--accent); font-weight: 600; }
 .ed-clear {
