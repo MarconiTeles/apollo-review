@@ -75,7 +75,17 @@ interface Draft {
 // copy/paste. Set this to the deployed Worker URL to post directly to ClickUp.
 const WORKER_URL = "https://apollo-review-proxy.marconimpn.workers.dev";
 
-export default function Editor({ payload }: { payload: ReviewPayload }) {
+export default function Editor({
+  payload,
+  readOnly = false,
+}: {
+  payload: ReviewPayload;
+  /** When true: no markup toolbar, no composer, no canvas gestures,
+   *  no textBox / shape edit chrome. Used by the "Ver review" path
+   *  (`?z=`) so reviewers can re-read a posted review without
+   *  drifting into edits. */
+  readOnly?: boolean;
+}) {
   const kind = mediaKindFor(payload.ext);
   const timed = kind === "video" || kind === "audio";
 
@@ -278,7 +288,10 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
   };
 
   // ── Drawing handlers (shape tools + textBox spawn) ─────────────────────
+  // All write-side handlers early-return in read-only — the canvas
+  // stays interactive only for the underlying media's native controls.
   const onPointerDown = (e: React.PointerEvent) => {
+    if (readOnly) return;
     if (tool === "select") {
       // Click on bare canvas (no annotation hit) — deselect.
       setSelectedId(null);
@@ -296,7 +309,7 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
     redraw();
   };
   const onPointerMove = (e: React.PointerEvent) => {
-    if (!draftRef.current) return;
+    if (readOnly || !draftRef.current) return;
     const p = toNorm(e);
     if (!p) return;
     draftRef.current.cur = p;
@@ -304,6 +317,7 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
     redraw();
   };
   const onPointerUp = () => {
+    if (readOnly) return;
     const d = draftRef.current;
     draftRef.current = null;
     if (!d) return;
@@ -866,55 +880,65 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
           <h1>{payload.mediaTitle || "Review"}</h1>
         </div>
         <div className="ed-statuswrap">
-          <select className="ed-status" value={status} onChange={(e) => setStatus(e.target.value)}>
-            {STATUSES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
-          </select>
-          <button className="ed-finish" onClick={finish}>Concluir review</button>
+          {readOnly ? (
+            // Read-only: just show the current status as a chip
+            // (parity with the Swift "Somente leitura" badge).
+            <span className="vw-stamp">
+              {STATUSES.find((s) => s.id === status)?.label ?? status}
+            </span>
+          ) : (
+            <>
+              <select className="ed-status" value={status} onChange={(e) => setStatus(e.target.value)}>
+                {STATUSES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+              </select>
+              <button className="ed-finish" onClick={finish}>Concluir review</button>
+            </>
+          )}
         </div>
       </header>
 
       <div className="vw-body">
         <section className="vw-stage" ref={stageRef}>
           <div className="vw-stage-canvas" ref={stageBoxRef}>
-            {/* Markup toolbar — floats over the stage (anchored top-
-                centre), only moves vertically via the grip drag. Matches
-                AnnotationToolbar in Swift. Rendered INSIDE the stage so
-                its `position: absolute` is relative to the canvas, not
-                the page. */}
-            <div
-              ref={toolbarRef}
-              className="ed-toolbar ed-toolbar-floating"
-              style={{ transform: `translate(-50%, ${toolbarOffset.y}px)` }}
-            >
-              <button
-                className="ed-grip"
-                title="Arraste para mover a barra"
-                onPointerDown={onGripDown}
-              >≡</button>
-              <div className="ed-sep" />
-              {TOOLS.map((t) => (
-                <button key={t.id} className={`ed-tool${tool === t.id ? " on" : ""}`}
-                        title={t.label} onClick={() => setTool(t.id)}>
-                  <span className="ed-glyph">{t.glyph}</span>
-                </button>
-              ))}
-              <div className="ed-sep" />
-              {COLORS.map((c) => (
-                <button key={c} className={`ed-color${color === c ? " on" : ""}`}
-                        style={{ background: c }} title={c} onClick={() => setColor(c)} />
-              ))}
-              <div className="ed-sep" />
-              {STROKES.map((s) => (
+            {/* Markup toolbar — floats over the stage. Hidden in
+                read-only ("Ver review") so the reviewer can't pick
+                a tool / draw anything. */}
+            {!readOnly && (
+              <div
+                ref={toolbarRef}
+                className="ed-toolbar ed-toolbar-floating"
+                style={{ transform: `translate(-50%, ${toolbarOffset.y}px)` }}
+              >
                 <button
-                  key={s.id}
-                  className={`ed-stroke${strokeId === s.id ? " on" : ""}`}
-                  title={`Traço ${s.label}`}
-                  onClick={() => setStrokeId(s.id)}
-                >
-                  <span className="ed-stroke-dot" style={{ width: s.dot, height: s.dot }} />
-                </button>
-              ))}
-            </div>
+                  className="ed-grip"
+                  title="Arraste para mover a barra"
+                  onPointerDown={onGripDown}
+                >≡</button>
+                <div className="ed-sep" />
+                {TOOLS.map((t) => (
+                  <button key={t.id} className={`ed-tool${tool === t.id ? " on" : ""}`}
+                          title={t.label} onClick={() => setTool(t.id)}>
+                    <span className="ed-glyph">{t.glyph}</span>
+                  </button>
+                ))}
+                <div className="ed-sep" />
+                {COLORS.map((c) => (
+                  <button key={c} className={`ed-color${color === c ? " on" : ""}`}
+                          style={{ background: c }} title={c} onClick={() => setColor(c)} />
+                ))}
+                <div className="ed-sep" />
+                {STROKES.map((s) => (
+                  <button
+                    key={s.id}
+                    className={`ed-stroke${strokeId === s.id ? " on" : ""}`}
+                    title={`Traço ${s.label}`}
+                    onClick={() => setStrokeId(s.id)}
+                  >
+                    <span className="ed-stroke-dot" style={{ width: s.dot, height: s.dot }} />
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div
               className="vw-zoom-wrap"
@@ -957,7 +981,7 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
                     </div>
                   )}
                   <canvas ref={canvasRef} className="vw-overlay ed-canvas"
-                          style={{ pointerEvents: "auto",
+                          style={{ pointerEvents: readOnly ? "none" : "auto",
                                    cursor: tool === "select" ? "default" : "crosshair" }}
                           onPointerDown={onPointerDown}
                           onPointerMove={onPointerMove}
@@ -970,6 +994,7 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
                         rect={stageRect}
                         tool={tool}
                         selectedId={selectedId}
+                        readOnly={readOnly}
                         onSelect={setSelectedId}
                         onMove={(id, dx, dy) => updateAnnotation(id, (a) => translateAnnotation(a, dx, dy))}
                         onResize={(id, h, dx, dy) => updateAnnotation(id, (a) => resizeAnnotation(a, h, dx, dy))}
@@ -979,6 +1004,7 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
                         rect={stageRect}
                         selectedId={selectedId}
                         tool={tool}
+                        readOnly={readOnly}
                         onSelect={setSelectedId}
                         onUpdate={(id, geom) =>
                           updateAnnotation(id, (a) => ({ ...a, geom }))
@@ -993,7 +1019,7 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
                 <div className="vw-media-wrap">
                   <img ref={imgRef} className="vw-media" src={payload.mediaUrl} alt={payload.mediaTitle} onLoad={redraw} />
                   <canvas ref={canvasRef} className="vw-overlay ed-canvas"
-                          style={{ pointerEvents: "auto",
+                          style={{ pointerEvents: readOnly ? "none" : "auto",
                                    cursor: tool === "select" ? "default" : "crosshair" }}
                           onPointerDown={onPointerDown}
                           onPointerMove={onPointerMove}
@@ -1006,6 +1032,7 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
                         rect={stageRect}
                         tool={tool}
                         selectedId={selectedId}
+                        readOnly={readOnly}
                         onSelect={setSelectedId}
                         onMove={(id, dx, dy) => updateAnnotation(id, (a) => translateAnnotation(a, dx, dy))}
                         onResize={(id, h, dx, dy) => updateAnnotation(id, (a) => resizeAnnotation(a, h, dx, dy))}
@@ -1015,6 +1042,7 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
                         rect={stageRect}
                         selectedId={selectedId}
                         tool={tool}
+                        readOnly={readOnly}
                         onSelect={setSelectedId}
                         onUpdate={(id, geom) =>
                           updateAnnotation(id, (a) => ({ ...a, geom }))
@@ -1099,7 +1127,9 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
             <div className="vw-rail-list">
               {ordered.length === 0 && (
                 <div className="vw-empty">
-                  Nenhum comentário ainda.<br />Tecle <kbd>C</kbd> para comentar, ou <kbd>P</kbd> para marcar.
+                  {readOnly
+                    ? "Nenhum comentário neste review."
+                    : <>Nenhum comentário ainda.<br />Tecle <kbd>C</kbd> para comentar, ou <kbd>P</kbd> para marcar.</>}
                 </div>
               )}
               {ordered.map((c) => (
@@ -1118,35 +1148,39 @@ export default function Editor({ payload }: { payload: ReviewPayload }) {
                 </div>
               ))}
             </div>
-            {/* Composer pinned to the bottom — matches Swift CommentRail. */}
-            <div className="ed-composer">
-              <div className="ed-composer-row">
-                <textarea
-                  ref={composerRef}
-                  className="ed-text"
-                  placeholder="Comentar…"
-                  value={body}
-                  onChange={(e) => setBody(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      addComment();
-                    }
-                  }}
-                  rows={2}
-                />
-                <button
-                  className="ed-add ed-add-compact"
-                  onClick={addComment}
-                  disabled={!body.trim() && pending.length === 0}
-                  title="Adicionar comentário (Enter)"
-                >
-                  {(inMs !== null && outMs !== null && outMs > inMs)
-                    ? `${fmt(inMs)}–${fmt(outMs)}`
-                    : fmt(pendingFrameMs ?? currentMs)}
-                </button>
+            {/* Composer pinned to the bottom — matches Swift CommentRail.
+                Hidden in read-only ("Ver review") so the reviewer
+                can't add new notes to a posted review. */}
+            {!readOnly && (
+              <div className="ed-composer">
+                <div className="ed-composer-row">
+                  <textarea
+                    ref={composerRef}
+                    className="ed-text"
+                    placeholder="Comentar…"
+                    value={body}
+                    onChange={(e) => setBody(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        addComment();
+                      }
+                    }}
+                    rows={2}
+                  />
+                  <button
+                    className="ed-add ed-add-compact"
+                    onClick={addComment}
+                    disabled={!body.trim() && pending.length === 0}
+                    title="Adicionar comentário (Enter)"
+                  >
+                    {(inMs !== null && outMs !== null && outMs > inMs)
+                      ? `${fmt(inMs)}–${fmt(outMs)}`
+                      : fmt(pendingFrameMs ?? currentMs)}
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
           </aside>
         )}
       </div>
@@ -1590,19 +1624,21 @@ function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
 // win for hit-testing).
 
 function ShapeHitLayer({
-  annotations, rect, tool, selectedId, onSelect, onMove, onResize,
+  annotations, rect, tool, selectedId, readOnly, onSelect, onMove, onResize,
 }: {
   annotations: Annotation[];
   rect: Rect;
   tool: Tool;
   selectedId: string | null;
+  readOnly?: boolean;
   onSelect: (id: string | null) => void;
   onMove: (id: string, dx: number, dy: number) => void;
   onResize: (id: string, handle: ShapeHandle, dx: number, dy: number) => void;
 }) {
   // Only "active" in select mode — under a drawing tool, the canvas
-  // below catches the pointer event for drawing.
-  if (tool !== "select") return null;
+  // below catches the pointer event for drawing. Read-only sessions
+  // skip the hit layer entirely (no select / drag / resize).
+  if (readOnly || tool !== "select") return null;
 
   const selected = annotations.find((a) => a.id === selectedId);
 
@@ -1756,12 +1792,13 @@ function resizeAnnotation(a: Annotation, h: ShapeHandle, dx: number, dy: number)
 // is actually editable and the tail's drag handle has its own hit area.
 
 function TextBoxLayer({
-  annotations, rect, selectedId, tool, onSelect, onUpdate, onDelete,
+  annotations, rect, selectedId, tool, readOnly, onSelect, onUpdate, onDelete,
 }: {
   annotations: Annotation[];
   rect: Rect;
   selectedId: string | null;
   tool: Tool;
+  readOnly?: boolean;
   onSelect: (id: string | null) => void;
   onUpdate: (id: string, geom: TextBoxGeom) => void;
   onDelete: (id: string) => void;
@@ -1778,6 +1815,7 @@ function TextBoxLayer({
             rect={rect}
             isSelected={selectedId === a.id}
             tool={tool}
+            readOnly={readOnly}
             onSelect={() => onSelect(a.id)}
             onUpdate={(g) => onUpdate(a.id, g)}
             onDelete={() => onDelete(a.id)}
@@ -1789,13 +1827,14 @@ function TextBoxLayer({
 }
 
 function EditableTextBox({
-  geom, rect, isSelected, tool, onSelect, onUpdate, onDelete,
+  geom, rect, isSelected, tool, readOnly = false, onSelect, onUpdate, onDelete,
 }: {
   annotation: Annotation;
   geom: TextBoxGeom;
   rect: Rect;
   isSelected: boolean;
   tool: Tool;
+  readOnly?: boolean;
   onSelect: () => void;
   onUpdate: (g: TextBoxGeom) => void;
   onDelete: () => void;
@@ -1818,12 +1857,13 @@ function EditableTextBox({
   // moved / resized / deleted). The textarea steals every keystroke
   // it sees — without this gate, typing 'a' over a finished bubble
   // would silently extend it instead of advancing the playhead.
-  const [isEditing, setIsEditing] = useState(geom.text === "");
+  const [isEditing, setIsEditing] = useState(geom.text === "" && !readOnly);
 
   // Auto-focus brand-new bubbles (text still empty). Existing ones with
-  // content only focus when the user enters edit mode.
+  // content only focus when the user enters edit mode. Read-only
+  // sessions never auto-focus.
   useEffect(() => {
-    if (geom.text === "" && taRef.current) taRef.current.focus();
+    if (geom.text === "" && !readOnly && taRef.current) taRef.current.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1866,6 +1906,7 @@ function EditableTextBox({
   }
 
   const startDrag = (e: React.PointerEvent) => {
+    if (readOnly) return;
     e.preventDefault();
     e.stopPropagation();
     onSelect();
@@ -1892,6 +1933,7 @@ function EditableTextBox({
   };
 
   const startResize = (e: React.PointerEvent) => {
+    if (readOnly) return;
     e.preventDefault();
     e.stopPropagation();
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -1915,6 +1957,7 @@ function EditableTextBox({
   };
 
   const startTail = (e: React.PointerEvent) => {
+    if (readOnly) return;
     e.preventDefault();
     e.stopPropagation();
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -1954,20 +1997,27 @@ function EditableTextBox({
 
       {/* Box */}
       <div
-        className={`ed-tb${isSelected ? " on" : ""}`}
+        className={`ed-tb${isSelected ? " on" : ""}${readOnly ? " readonly" : ""}`}
         style={{ left, top, width: w, height: h }}
-        onPointerDown={(e) => { e.stopPropagation(); onSelect(); }}
+        onPointerDown={(e) => {
+          if (readOnly) return;            // no select in view-only
+          e.stopPropagation();
+          onSelect();
+        }}
       >
-        <div className="ed-tb-bar" onPointerDown={startDrag}>
-          <span className="ed-tb-grip">≡</span>
-          <button
-            className="ed-tb-x"
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            onPointerDown={(e) => e.stopPropagation()}
-            title="Excluir"
-          >×</button>
-        </div>
-        {isEditing ? (
+        {/* Drag bar (grip + delete) — write chrome only. */}
+        {!readOnly && (
+          <div className="ed-tb-bar" onPointerDown={startDrag}>
+            <span className="ed-tb-grip">≡</span>
+            <button
+              className="ed-tb-x"
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              onPointerDown={(e) => e.stopPropagation()}
+              title="Excluir"
+            >×</button>
+          </div>
+        )}
+        {isEditing && !readOnly ? (
           <textarea
             ref={taRef}
             className="ed-tb-text"
@@ -1990,34 +2040,49 @@ function EditableTextBox({
           <div
             className="ed-tb-text ed-tb-text-static"
             // Static label — single-click selects, double-click edits,
-            // single-click while the text tool is active also edits
-            // (matches the Swift app's behaviour).
-            onPointerDown={(e) => { e.stopPropagation(); onSelect(); }}
+            // single-click while the text tool is active also edits.
+            // In read-only, just a plain label; the underlying media
+            // takes the click instead.
+            onPointerDown={(e) => {
+              if (readOnly) return;
+              e.stopPropagation(); onSelect();
+            }}
             onClick={(e) => {
+              if (readOnly) return;
               e.stopPropagation();
               if (tool === "text") enterEdit();
             }}
-            onDoubleClick={(e) => { e.stopPropagation(); enterEdit(); }}
+            onDoubleClick={(e) => {
+              if (readOnly) return;
+              e.stopPropagation(); enterEdit();
+            }}
           >
             {geom.text || (
-              <span className="ed-tb-text-placeholder">Toque duas vezes para editar</span>
+              !readOnly && (
+                <span className="ed-tb-text-placeholder">Toque duas vezes para editar</span>
+              )
             )}
           </div>
         )}
-        <div
-          className="ed-tb-resize"
-          onPointerDown={startResize}
-          title="Redimensionar"
-        >⤡</div>
+        {/* Resize handle — write chrome only. */}
+        {!readOnly && (
+          <div
+            className="ed-tb-resize"
+            onPointerDown={startResize}
+            title="Redimensionar"
+          >⤡</div>
+        )}
       </div>
 
-      {/* Tail-tip handle */}
-      <div
-        className="ed-tb-tip"
-        style={{ left: tipL - 5, top: tipT - 5 }}
-        onPointerDown={startTail}
-        title="Mover a ponta do balão"
-      />
+      {/* Tail-tip handle — write chrome only. */}
+      {!readOnly && (
+        <div
+          className="ed-tb-tip"
+          style={{ left: tipL - 5, top: tipT - 5 }}
+          onPointerDown={startTail}
+          title="Mover a ponta do balão"
+        />
+      )}
     </>
   );
 }

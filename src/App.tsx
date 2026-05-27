@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import Viewer from "./viewer/Viewer";
 import Editor from "./viewer/Editor";
 import { decodeInlinePayload, type ReviewPayload } from "./viewer/payload";
 import "./App.css";
@@ -67,7 +66,7 @@ export default function App() {
   }, []);
 
   if (state.phase === "ready")
-    return state.edit ? <Editor payload={state.payload} /> : <Viewer payload={state.payload} />;
+    return <Editor payload={state.payload} readOnly={!state.edit} />;
 
   return (
     <div className="vw-splash">
