@@ -137,9 +137,26 @@ body { background: var(--paper); }
   min-width: 0;
   background: var(--stage);
   display: flex;
+  flex-direction: column;       /* stack: canvas (fills) → transport */
+}
+.vw-stage-canvas {
+  flex: 1;                      /* takes all leftover height */
+  position: relative;           /* anchor for the floating markup toolbar */
+  display: flex;
   align-items: center;
   justify-content: center;
   padding: 20px;
+  overflow: hidden;
+  min-height: 0;
+}
+.vw-zoom-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: 100%;
+  transition: transform 80ms ease-out;
 }
 .vw-media-wrap {
   position: relative;
@@ -150,7 +167,7 @@ body { background: var(--paper); }
 .vw-media {
   display: block;
   max-width: 100%;
-  max-height: calc(100vh - 120px);
+  max-height: calc(100vh - 200px);   /* leaves room for header + toolbar + transport */
   object-fit: contain;
   background: #000;
 }
@@ -172,7 +189,7 @@ body { background: var(--paper); }
 .vw-rail {
   width: 340px;
   flex-shrink: 0;
-  background: var(--page);
+  background: var(--paper);                /* matches Apollo's canvas */
   border-left: 1px solid var(--line);
   display: flex;
   flex-direction: column;
@@ -191,28 +208,27 @@ body { background: var(--paper); }
 .vw-empty { color: var(--ink-faint); padding: 24px 14px; text-align: center; font-size: 13px; }
 
 .vw-comment {
-  border-radius: 10px;
-  margin: 4px 2px;
-  border: 1px solid transparent;
+  border-radius: 0;
+  margin: 0;
+  border: 0;
 }
-.vw-comment.is-selected {
-  background: var(--paper);
-  border-color: var(--line);
-}
-.vw-comment.is-resolved { opacity: 0.55; }
+/* Selected comment — cinnabar wash, no border, no radius.
+   Mirrors Swift CommentRow's `Editorial.accentSoft` background. */
+.vw-comment.is-selected           { background: rgba(199, 50, 27, 0.10); }
+.vw-comment.is-resolved           { opacity: 0.55; }
 .vw-comment-main {
   width: 100%;
   text-align: left;
   background: none;
   border: 0;
-  padding: 10px 12px;
+  padding: 11px 16px;
   cursor: pointer;
   font: inherit;
   color: inherit;
   display: block;
-  border-radius: 10px;
 }
-.vw-comment-main:hover { background: var(--paper); }
+.vw-comment-main:hover            { background: rgba(199, 50, 27, 0.06); }
+.vw-comment.is-selected .vw-comment-main:hover { background: transparent; }
 .vw-comment-meta {
   display: flex;
   align-items: center;
@@ -269,7 +285,18 @@ body { background: var(--paper); }
 
 .ed-toolbar {
   display: flex; align-items: center; gap: 6px;
-  padding: 8px 18px; border-bottom: 1px solid var(--line); background: var(--page);
+  padding: 8px 12px; background: var(--page);
+  border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+}
+/* Floating variant — pinned to the top-centre of the stage, moves only
+   vertically via the grip drag. Mirrors AnnotationToolbar in Swift. */
+.ed-toolbar-floating {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  z-index: 30;
+  transform: translateX(-50%);
 }
 .ed-tool {
   width: 32px; height: 30px; border: 1px solid var(--line); border-radius: 7px;
@@ -285,8 +312,46 @@ body { background: var(--paper); }
 }
 .ed-color.on { border-color: var(--ink); }
 
-.ed-composer { padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--paper); }
-.ed-composer-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; min-height: 20px; }
+/* Composer height is locked to the transport bar's so the rail's
+   bottom edge sits on the same horizontal as the video's transport.
+   The textarea + button sit FLUSH at the bottom of the composer
+   (justify-content: flex-end) so the textarea's top edge lines up
+   exactly with the transport's controls row — giving the user one
+   continuous horizontal across the whole window. */
+.ed-composer {
+  padding: 12px 16px;            /* matches transport horizontal padding */
+  background: transparent;       /* inherits the rail's cream */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;       /* textarea + button sit at vertical centre */
+  min-height: 84px;              /* matches .ed-transport min-height */
+  box-sizing: border-box;
+}
+.ed-composer-row {
+  display: flex; align-items: stretch; gap: 6px;
+}
+.ed-composer-row .ed-text {
+  flex: 1; margin: 0;
+  min-height: 22px;              /* −35% (was 32) */
+  max-height: 54px;
+  resize: none;
+  padding: 4px 9px;
+  font-size: 13px;
+  line-height: 1.3;
+}
+.ed-composer-meta { display: flex; align-items: center; gap: 8px; margin-top: 4px; min-height: 14px; }
+/* Higher-specificity selector — `.ed-add` is declared further down
+   with `width: 100%`, so without `.ed-add.ed-add-compact` the
+   compact variant would lose the cascade and the button would
+   stretch to fill the composer. */
+.ed-add.ed-add-compact {
+  margin: 0; width: auto; flex-shrink: 0;
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  padding: 0 10px; line-height: 1;
+  min-width: 56px; max-width: 80px;
+  white-space: nowrap;
+  align-self: stretch;
+}
 .ed-pending { font-size: 12px; color: var(--accent); font-weight: 600; }
 .ed-clear {
   font: inherit; font-size: 11px; color: var(--ink-faint); background: none; border: 0;
@@ -317,4 +382,352 @@ body { background: var(--paper); }
   resize: vertical;
 }
 .ed-modal-actions { display: flex; gap: 10px; align-items: center; justify-content: flex-end; }
+
+/* ── Markup toolbar additions ───────────────────────────────────────────── */
+/* Grip handle — the only drag target for moving the floating toolbar. */
+.ed-grip {
+  width: 22px; height: 26px;
+  display: grid; place-items: center;
+  font: inherit; font-size: 13px;
+  background: transparent; border: 0;
+  color: var(--ink-faint); cursor: grab;
+}
+.ed-grip:active { cursor: grabbing; }
+
+/* Stroke-width picker buttons. */
+.ed-stroke {
+  width: 22px; height: 22px; padding: 0;
+  display: grid; place-items: center;
+  background: transparent; border: 0; border-radius: 5px;
+  cursor: pointer; color: var(--ink-soft);
+}
+.ed-stroke.on { background: var(--ink); }
+.ed-stroke-dot {
+  display: inline-block; border-radius: 50%;
+  background: var(--ink);
+}
+.ed-stroke.on .ed-stroke-dot { background: var(--page); }
+
+/* ── Interactive overlays (shape hit areas + textBox speech-bubbles) ─── */
+
+/* Container above the canvas — fills the media wrap so absolute children
+   align with the artwork. Pointer-events: none on the container; each
+   child re-enables what it needs. */
+.ed-hitlayer, .ed-tblayer {
+  position: absolute; inset: 0;
+  pointer-events: none;
+}
+
+/* Per-shape transparent hit rect. Slightly inset border on hover for
+   discoverability without becoming visual noise. */
+.ed-hit {
+  position: absolute;
+  pointer-events: auto;
+  cursor: move;
+  border-radius: 4px;
+}
+.ed-hit:hover { box-shadow: inset 0 0 0 1px rgba(199, 50, 27, 0.25); }
+
+/* TextBox speech bubble. Cream paper + cinnabar accent (fixed regardless
+   of theme so the bubble reads as a sticky note over the artwork). */
+.ed-tb {
+  position: absolute;
+  pointer-events: auto;
+  background: #FAF7F0;
+  border: 1px solid #C7321B;
+  border-radius: 6px;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.ed-tb.on { box-shadow: 0 0 0 4px rgba(199, 50, 27, 0.18); }
+.ed-tb-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 2px 6px;
+  background: rgba(199, 50, 27, 0.08);
+  cursor: grab;
+  user-select: none;
+}
+.ed-tb-bar:active { cursor: grabbing; }
+.ed-tb-grip { color: rgba(199, 50, 27, 0.55); font-size: 11px; font-weight: 600; }
+.ed-tb-x {
+  font: inherit; font-size: 12px; line-height: 1;
+  color: rgba(199, 50, 27, 0.55);
+  background: transparent; border: 0; cursor: pointer; padding: 0 4px;
+}
+.ed-tb-x:hover { color: #C7321B; }
+.ed-tb-text {
+  flex: 1;
+  font: inherit; font-size: 13px; font-weight: 500;
+  color: #C7321B;
+  background: transparent;
+  border: 0; outline: 0; resize: none;
+  padding: 6px 8px;
+}
+.ed-tb-text::placeholder { color: rgba(199, 50, 27, 0.4); }
+/* Static label view — same metrics as the textarea so the bubble's
+   silhouette doesn't jump when switching in/out of edit mode. */
+.ed-tb-text-static {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: text;
+  user-select: none;
+}
+.ed-tb-text-placeholder { color: rgba(199, 50, 27, 0.4); }
+.ed-tb-resize {
+  position: absolute; right: 2px; bottom: 1px;
+  font-size: 11px; line-height: 1; color: rgba(199, 50, 27, 0.7);
+  cursor: nwse-resize;
+  user-select: none;
+}
+
+/* Loading overlay shown while the video is buffering. BG matches the
+   transport bar so the screen reads as one continuous surface. */
+.ed-loading {
+  position: absolute; inset: 0;
+  background: var(--page);
+  display: flex; align-items: center; justify-content: center;
+  gap: 10px;
+  color: var(--ink-soft);
+  font-family: var(--sans);
+  font-size: 13px;
+  pointer-events: none;
+}
+.ed-spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: ed-spin 0.85s linear infinite;
+}
+@keyframes ed-spin { to { transform: rotate(360deg); } }
+
+/* Resize handles for selected shapes. Small circles at corners / endpoints. */
+.ed-handle {
+  position: absolute;
+  width: 12px; height: 12px;
+  background: var(--accent);
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  pointer-events: auto;
+  cursor: pointer;
+}
+.ed-handle-tl, .ed-handle-br { cursor: nwse-resize; }
+.ed-handle-tr, .ed-handle-bl { cursor: nesw-resize; }
+.ed-handle-p1, .ed-handle-p2 { cursor: move; }
+
+/* Tail-tip handle — a small circle that the user grabs to re-aim the
+   speech-bubble's pointer. */
+.ed-tb-tip {
+  position: absolute;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #C7321B;
+  border: 1.5px solid #FAF7F0;
+  pointer-events: auto;
+  cursor: grab;
+}
+.ed-tb-tip:active { cursor: grabbing; }
+
+@media (prefers-color-scheme: dark) {
+  /* The text-bubble keeps its cream + cinnabar identity in dark mode —
+     it's a deliberate sticky-note look over the dark canvas. No override
+     needed; the inline colours above are constants. */
+}
 .ed-modal-actions .ed-add { width: auto; margin-top: 0; }
+
+/* ─── Parity additions (Concluir / zoom / transport / guides / help) ──── */
+
+/* Aplicar button on the markup toolbar. Neutral when nothing is
+   pending (just a "voltar ao cursor" affordance); accent when there
+   are shapes to commit, so the user can see the publish action is
+   live. */
+.ed-conclude {
+  font: inherit; font-size: 12px; font-weight: 600;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: background-color 120ms, color 120ms, border-color 120ms;
+}
+.ed-conclude:hover    { background: rgba(199, 50, 27, 0.10); }
+.ed-conclude.on       {
+  color: var(--paper); background: var(--accent); border-color: var(--accent);
+}
+.ed-conclude.on:hover { filter: brightness(1.05); }
+
+/* Aspect-guide overlay — sits over the media, lets clicks fall through. */
+.ed-guide-svg { mix-blend-mode: normal; }
+
+/* Audio: thin centred card with the filename + a hidden <video> driver. */
+.vw-audio-wrap { display: flex; align-items: center; justify-content: center;
+                 height: 100%; width: 100%; }
+.vw-audio-card { color: var(--ink); text-align: center; padding: 24px; }
+.vw-audio-media { width: 1px; height: 1px; opacity: 0; pointer-events: none;
+                  position: absolute; }
+
+/* Custom transport bar — 2-row layout mirroring Swift `videoTransport`:
+   timeline at the top, controls at the bottom. Height matches the
+   rail's composer so both top borders share an exact horizontal. */
+.ed-transport {
+  display: flex; flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--page);
+  border-top: 1px solid var(--line);
+  font: 12px var(--sans);
+  color: var(--ink);
+  min-height: 84px;               /* matches .ed-composer min-height */
+  box-sizing: border-box;
+}
+
+/* Row 1: scrubber. Same metrics as Swift `TimelineBar`. */
+.ed-tp-track {
+  position: relative; height: 20px; cursor: pointer;
+}
+.ed-tp-rail   { position: absolute; left: 0; right: 0; top: 8px; height: 4px;
+                background: var(--line); border-radius: 2px; }
+.ed-tp-played { position: absolute; left: 0; top: 8px; height: 4px;
+                background: rgba(199, 50, 27, 0.55); border-radius: 2px; }
+.ed-tp-range  { position: absolute; top: 6px; height: 8px;
+                background: rgba(199, 50, 27, 0.16); border-radius: 2px;
+                pointer-events: none; }
+.ed-tp-rspan  { position: absolute; top: 5px; height: 10px;
+                background: rgba(199, 50, 27, 0.25); border-radius: 2px;
+                pointer-events: none; }
+.ed-tp-flag   { position: absolute; top: 3px; width: 2px; height: 14px;
+                background: var(--ink-soft); transform: translateX(-1px);
+                pointer-events: none; }
+.ed-tp-marker { position: absolute; top: 7px; width: 8px; height: 8px;
+                border-radius: 50%; background: var(--accent);
+                border: 1.5px solid var(--page);
+                transform: translateX(-4px);
+                pointer-events: none; }
+.ed-tp-head   { position: absolute; top: 2px; width: 2px; height: 16px;
+                background: var(--ink); transform: translateX(-1px);
+                pointer-events: none; }
+
+/* Row 2: controls. Three groups, with the centre auto-spreading. */
+.ed-tp-controls {
+  display: flex; align-items: center; gap: 6px;
+}
+.ed-tp-group { display: flex; align-items: center; gap: 4px; }
+.ed-tp-group + .ed-tp-tc { margin-left: auto; }
+.ed-tp-tc    { margin-right: auto; }
+.ed-tp-tc + .ed-tp-group { margin-left: 0; }
+
+/* SF-style icon button — square, hairline border, accent hover. */
+.ed-tp-ibtn {
+  width: 26px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; padding: 0;
+  background: transparent;
+  color: var(--ink);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.ed-tp-ibtn:hover { background: rgba(199, 50, 27, 0.12); }
+.ed-tp-ibtn.on    { color: var(--accent); }
+.ed-tp-ibtn:disabled { opacity: 0.35; cursor: default; }
+.ed-tp-ibtn svg { display: block; }
+
+/* SMPTE timecode (centre). Mono, semibold for the playhead. */
+.ed-tp-tc {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--mono); font-size: 13px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.ed-tp-tc-cur { font-weight: 600; }
+.ed-tp-tc-sep { color: var(--ink-faint); }
+.ed-tp-tc-dur { color: var(--ink-soft); }
+
+/* Zoom percent — text-button, no border, same metrics as icon buttons. */
+.ed-tp-pct {
+  min-width: 42px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--ink-soft);
+  background: transparent; border: 0;
+  border-radius: 5px; cursor: pointer;
+}
+.ed-tp-pct:hover { background: rgba(199, 50, 27, 0.12); color: var(--ink); }
+
+/* Native <select> styled as a chevron-button — same look as Swift Menu. */
+.ed-tp-menu {
+  position: relative;
+  display: inline-flex; align-items: center; gap: 2px;
+  height: 24px; padding: 0 6px 0 8px;
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  color: var(--ink);
+  background: transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.ed-tp-menu:hover { background: rgba(199, 50, 27, 0.12); }
+.ed-tp-menu > span { line-height: 1; }
+.ed-tp-menu > svg  { opacity: 0.55; }
+.ed-tp-menu select {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  opacity: 0; cursor: pointer;
+  appearance: none; -webkit-appearance: none;
+  border: 0; background: transparent;
+  font: inherit; color: inherit;
+}
+
+/* JKL shuttle readout chip — top-left of the stage. */
+.ed-shuttle {
+  position: fixed; top: 64px; left: 16px;
+  padding: 4px 8px; border-radius: 4px;
+  background: rgba(0, 0, 0, 0.4);
+  color: var(--paper);
+  font: 12px var(--mono); font-weight: 500;
+  pointer-events: none;
+  z-index: 50;
+}
+
+/* Help sheet — Frame.io-style shortcuts modal. */
+.ed-help-scrim {
+  position: fixed; inset: 0;
+  background: rgba(20, 19, 15, 0.28);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100;
+}
+.ed-help-card {
+  background: var(--page);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 22px 26px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.18);
+  max-width: 920px;
+}
+.ed-help-head { display: flex; align-items: center; justify-content: space-between;
+                margin-bottom: 14px; }
+.ed-help-sub  { font: italic 13px var(--serif); color: var(--ink-soft); }
+.ed-help-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; }
+.ed-help-col h4 {
+  font: 12px var(--sans); font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin: 0 0 10px;
+}
+.ed-help-row { display: flex; align-items: baseline; gap: 10px;
+               padding: 3px 0; }
+.ed-help-row kbd {
+  font: 11px var(--mono); font-weight: 500;
+  background: var(--line); color: var(--ink);
+  padding: 2px 6px; border-radius: 4px;
+  white-space: nowrap; min-width: 64px;
+  display: inline-block; text-align: center;
+}
+.ed-help-row span { font: 12px var(--sans); color: var(--ink-soft); }
+
+@media (max-width: 880px) {
+  .ed-help-grid { grid-template-columns: repeat(2, 1fr); }
+}

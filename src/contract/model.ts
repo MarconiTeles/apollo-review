@@ -56,7 +56,8 @@ export type AnnotationShape =
   | "arrow"
   | "line"
   | "freehand"
-  | "text";
+  | "text"
+  | "textBox";
 
 export interface RectGeom {
   shape: "rect" | "ellipse";
@@ -82,12 +83,26 @@ export interface TextGeom {
   y: number;
   text: string;
 }
+/** Movable + resizable speech-bubble. `text` IS the comment body
+ *  (auto-saved on every edit) and `tailX`/`tailY` is the dialogue
+ *  tail's tip — initially the click point, re-aimable by the user. */
+export interface TextBoxGeom {
+  shape: "textBox";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+  tailX: number;
+  tailY: number;
+}
 
 export type AnnotationGeom =
   | RectGeom
   | SegmentGeom
   | FreehandGeom
-  | TextGeom;
+  | TextGeom
+  | TextBoxGeom;
 
 export interface Annotation {
   id: string;
