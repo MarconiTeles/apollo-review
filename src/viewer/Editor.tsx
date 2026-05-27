@@ -1552,12 +1552,20 @@ function Icon({ name }: { name: IconName }) {
         <path d="M3 6 L8 11 L13 6"/>
       </svg>;
     case "markup-pen":
-      // Pencil-tip in a circle — matches SF Symbols `pencil.tip.crop.circle`
-      // (the same glyph Apollo Swift uses on its header markup toggle).
-      return <svg {...common} fill="none" strokeWidth="1.3">
-        <circle cx="8" cy="8" r="6"/>
-        <path d="M6.6 9.4 L9.4 6.6 L10.6 7.8 L7.8 10.6 Z" fill="currentColor" stroke="none"/>
-        <path d="M9.4 6.6 L10.4 5.6 L11.4 6.6 L10.6 7.6" stroke="currentColor"/>
+      // Clean pencil (Heroicons-style). Rendered larger than the
+      // transport icons so it reads clearly inside the composer's
+      // inline action slot.
+      return <svg
+        width="18" height="18" viewBox="0 0 20 20"
+        fill="none" stroke="currentColor" strokeWidth="1.6"
+        strokeLinecap="round" strokeLinejoin="round"
+      >
+        {/* Outer outline (head, body, tip, paper) */}
+        <path d="M14.2 2.8 L17.2 5.8 L7.4 15.6 L3 17 L4.4 12.6 Z"/>
+        {/* Ferrule — short cross-line where the metal band sits */}
+        <path d="M12.2 4.8 L15.2 7.8"/>
+        {/* Tip emphasis — a tiny diagonal stroke at the point */}
+        <path d="M3 17 L5.4 14.6"/>
       </svg>;
   }
 }

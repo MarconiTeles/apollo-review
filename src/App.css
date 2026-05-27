@@ -360,14 +360,16 @@ body { background: var(--paper); }
   flex-shrink: 0;
 }
 /* Inline icon button (e.g. markup-toolbar toggle). Transparent until
-   hover so the textarea reads as the primary surface. */
+   hover so the textarea reads as the primary surface. Larger than the
+   transport icons so the glyph stays legible inside the composer. */
 .ed-comp-action {
-  width: 28px; height: 28px;
+  width: 32px; height: 32px;
   display: inline-flex; align-items: center; justify-content: center;
   background: transparent; border: 0; padding: 0;
   border-radius: 6px;
   color: var(--ink-soft);
   cursor: pointer;
+  transition: background-color 120ms, color 120ms;
 }
 .ed-comp-action:hover { background: rgba(199, 50, 27, 0.10); color: var(--ink); }
 .ed-comp-action.on    { color: var(--accent); background: rgba(199, 50, 27, 0.12); }
