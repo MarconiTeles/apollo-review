@@ -969,7 +969,29 @@ export default function Editor({
     <div className="viewer ed">
       <header className="vw-header">
         <div className="vw-title">
-          <span className="vw-brand">Apollo Review · editar</span>
+          <div className="vw-brandrow">
+            <span className="vw-brand">Apollo Review · editar</span>
+            {payload.mediaUrl && (
+              <a
+                className="vw-dl"
+                href={payload.mediaUrl}
+                download={payload.mediaTitle || ""}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Baixar arquivo"
+                aria-label="Baixar arquivo"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" strokeWidth="2.2"
+                     strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Baixar
+              </a>
+            )}
+          </div>
           <h1>{payload.mediaTitle || "Review"}</h1>
         </div>
         <div className="ed-statuswrap">

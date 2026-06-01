@@ -82,6 +82,27 @@ body { background: var(--paper); }
   color: var(--accent);
   margin-bottom: 8px;
 }
+/* Brand + download row in the editor header. */
+.vw-brandrow { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.vw-brandrow .vw-brand { margin-bottom: 0; }
+.vw-dl {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  text-decoration: none;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.vw-dl:hover { color: var(--ink); border-color: var(--ink-faint); }
+.vw-dl svg { display: block; }
+
 .vw-muted { color: var(--ink-faint); margin: 6px 0 0; }
 .vw-err { color: var(--accent); font-weight: 600; margin: 6px 0 0; }
 
