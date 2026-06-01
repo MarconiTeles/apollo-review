@@ -104,6 +104,7 @@ async function resolveSession(p, env) {
       uploaderId: p.uploaderId ?? null,
       createdById: p.createdById ?? p.actorId ?? null,
       status: "in_review",
+      clickupCommentId: null,
       comments: [],
       createdAt: now,
       updatedAt: now,
@@ -115,6 +116,7 @@ async function resolveSession(p, env) {
     reviewId: review.reviewId,
     versionId: review.versionId || "v1",
     status: review.status,
+    clickupCommentId: review.clickupCommentId ?? null,
     comments: review.comments || [],
   });
 }
@@ -138,6 +140,9 @@ async function saveSession(p, env) {
 
   if (p.status) review.status = p.status;
   if (Array.isArray(p.comments)) review.comments = p.comments;
+  // The single ClickUp conclusion comment's id — merged without touching
+  // comments (Apollo sends it alone after posting/replacing the comment).
+  if (p.clickupCommentId !== undefined) review.clickupCommentId = p.clickupCommentId;
 
   await storeReview(env, review);
   return json({ ok: true });
