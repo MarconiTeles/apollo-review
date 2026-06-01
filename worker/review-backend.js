@@ -45,6 +45,7 @@ export default {
       switch (path) {
         case "/session/resolve": return await resolveSession(payload, env);
         case "/session/save":    return await saveSession(payload, env);
+        case "/session/meta":    return await sessionMeta(payload, env);
         default:                 return json({ error: `unknown route ${path}` }, 404);
       }
     } catch (e) {
@@ -64,6 +65,21 @@ async function storeReview(env, review) {
   review.updatedAt = new Date().toISOString();
   await env.REVIEWS.put(keyFor(review.reviewId), JSON.stringify(review));
   return review;
+}
+
+// ── /session/meta ───────────────────────────────────────────────────────────
+// Cheap poll for the badge: returns only whether a review exists and when it
+// last changed — no comments/markup payload. Apollo compares updatedAt to its
+// locally-stored "last seen" to decide the dot on the REVIEW button.
+async function sessionMeta(p, env) {
+  if (!p.attachmentId) return json({ error: "missing attachmentId" }, 400);
+  const review = await loadReview(env, p.attachmentId);
+  return json({
+    exists: !!review,
+    updatedAt: review ? review.updatedAt ?? null : null,
+    status: review ? review.status ?? null : null,
+    commentCount: review ? (review.comments || []).length : 0,
+  });
 }
 
 // ── /session/resolve ────────────────────────────────────────────────────────
