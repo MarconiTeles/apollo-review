@@ -1,8 +1,9 @@
 // Shared data model — the contract between the review app (this Tauri/React
-// project), the Supabase backend, and the Apollo (Swift) side.
+// project), the Cloudflare KV backend, and the Apollo (Swift) side.
 //
-// Mirror any change here in:
-//   - supabase/schema.sql        (storage shape)
+// State is stored as ONE JSON blob per attachment in Cloudflare KV (see
+// worker/clickup-proxy.js). Mirror any change here in:
+//   - worker/clickup-proxy.js    (KV blob shape + ClickUp mapping)
 //   - src/contract/urlscheme.ts  (how Apollo opens a review)
 //   - the Swift Codable structs on the Apollo side (condensed panel)
 
@@ -125,6 +126,10 @@ export interface ReviewComment {
   /** Reply threading. null = top-level comment. */
   parentId: string | null;
   resolved: boolean;
+  /** Checkbox attribution: who ticked this item done (display name — the web
+   *  reviewer/executor has no ClickUp login) and when. Null while open. */
+  resolvedByName?: string | null;
+  resolvedAt?: string | null;
   /** Vector markup attached to this comment (drawn at its anchor). */
   annotations: Annotation[];
   createdAt: string; // ISO 8601
@@ -168,6 +173,9 @@ export interface ReviewSession {
   // ── State ──
   status: ReviewStatus;
   currentVersionId: string | null;
+  /** The single ClickUp comment that announces this review — posted once on
+   *  the first conclusion, then edited in place. Null until then. */
+  clickupCommentId: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -26,3 +26,7 @@ dist-ssr
 
 # Local sample media for dev (large binary, do not commit)
 public/sample.mov
+
+# Cloudflare API token used for deploy (never commit a credential)
+worker/.cf-token
+.cf-token

@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
 import Editor from "./viewer/Editor";
-import { decodeInlinePayload, type ReviewPayload } from "./viewer/payload";
+import { decodeInlinePayload, mediaKindFor, type ReviewPayload } from "./viewer/payload";
+import {
+  resolveSession,
+  WORKER_URL,
+  type SessionContext,
+} from "./contract/session";
 import "./App.css";
 
 type LoadState =
   | { phase: "idle" }
   | { phase: "loading" }
-  | { phase: "ready"; payload: ReviewPayload; edit: boolean }
+  | { phase: "ready"; payload: ReviewPayload; edit: boolean; session?: SessionContext }
   | { phase: "error"; message: string };
 
 export default function App() {
@@ -14,13 +19,14 @@ export default function App() {
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
-    const inline = p.get("z"); // self-contained review payload (no fetch → no CORS)
-    const media = p.get("m"); // open a raw file for review (REVISAR entry point)
+    const inline = p.get("z"); // legacy self-contained payload (immutable link)
+    const att = p.get("att"); // server-backed review, keyed by attachment
+    const media = p.get("m"); // raw media to review
     const url = p.get("d") || p.get("data"); // legacy: fetch a JSON URL
 
     let cancelled = false;
-    const ok = (payload: ReviewPayload, edit = false) => {
-      if (!cancelled) setState({ phase: "ready", payload, edit });
+    const ok = (payload: ReviewPayload, edit = false, session?: SessionContext) => {
+      if (!cancelled) setState({ phase: "ready", payload, edit, session });
     };
     const fail = (e: unknown) => {
       if (!cancelled)
@@ -31,23 +37,63 @@ export default function App() {
     };
 
     if (inline) {
+      // Old "VER REVIEW" links posted before the server backend existed.
       setState({ phase: "loading" });
-      decodeInlinePayload(inline).then(ok).catch(fail);
-    } else if (media) {
-      // Fresh review of a file → open the EDITOR (no payload yet, just media).
-      ok({
+      decodeInlinePayload(inline).then((pl) => ok(pl)).catch(fail);
+    } else if (att && media && WORKER_URL) {
+      // ── The single live link. Same URL for "revisar" and "ver": it resolves
+      //    to the KV blob for this attachment and stays editable. ──
+      setState({ phase: "loading" });
+      const ext = p.get("x") ?? media.split(".").pop() ?? "";
+      resolveSession({
         taskId: p.get("task") ?? "",
-        attachmentId: p.get("att") ?? "",
-        commentId: p.get("cmt") ?? null,
-        uploaderId: p.get("up") ? Number(p.get("up")) : null,
-        uploaderName: p.get("un") ?? null,
-        status: "in_review",
-        summaryText: "",
+        listId: p.get("list"),
+        attachmentId: att,
         mediaUrl: media,
-        ext: p.get("x") ?? media.split(".").pop() ?? "",
         mediaTitle: p.get("t") ?? "Arquivo",
-        comments: [],
-      }, true);
+        mediaKind: mediaKindFor(ext),
+        uploaderId: p.get("up") ? Number(p.get("up")) : null,
+        createdById: p.get("by") ? Number(p.get("by")) : null,
+        actorId: p.get("actor") ? Number(p.get("actor")) : null,
+      })
+        .then((res) =>
+          ok(
+            {
+              taskId: p.get("task") ?? "",
+              attachmentId: att,
+              commentId: p.get("cmt") ?? null,
+              uploaderId: p.get("up") ? Number(p.get("up")) : null,
+              uploaderName: p.get("un") ?? null,
+              status: res.status,
+              summaryText: "",
+              mediaUrl: media,
+              ext,
+              mediaTitle: p.get("t") ?? "Arquivo",
+              comments: res.comments,
+            },
+            true,
+            { reviewId: res.reviewId, versionId: res.versionId },
+          ),
+        )
+        .catch(fail);
+    } else if (media) {
+      // Legacy fresh review of a file with no backend → local editor only.
+      ok(
+        {
+          taskId: p.get("task") ?? "",
+          attachmentId: p.get("att") ?? "",
+          commentId: p.get("cmt") ?? null,
+          uploaderId: p.get("up") ? Number(p.get("up")) : null,
+          uploaderName: p.get("un") ?? null,
+          status: "in_review",
+          summaryText: "",
+          mediaUrl: media,
+          ext: p.get("x") ?? media.split(".").pop() ?? "",
+          mediaTitle: p.get("t") ?? "Arquivo",
+          comments: [],
+        },
+        true,
+      );
     } else if (url) {
       setState({ phase: "loading" });
       fetch(url)
@@ -55,7 +101,7 @@ export default function App() {
           if (!r.ok) throw new Error(`HTTP ${r.status} ao baixar o review.`);
           return (await r.json()) as ReviewPayload;
         })
-        .then(ok)
+        .then((pl) => ok(pl))
         .catch(fail);
     } else {
       setState({ phase: "error", message: "Nenhum review especificado no link." });
@@ -66,7 +112,13 @@ export default function App() {
   }, []);
 
   if (state.phase === "ready")
-    return <Editor payload={state.payload} readOnly={!state.edit} />;
+    return (
+      <Editor
+        payload={state.payload}
+        readOnly={!state.edit}
+        session={state.session}
+      />
+    );
 
   return (
     <div className="vw-splash">

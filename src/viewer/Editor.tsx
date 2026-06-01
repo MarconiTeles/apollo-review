@@ -7,6 +7,11 @@ import {
   mediaKindFor,
   type ReviewPayload,
 } from "./payload";
+import {
+  saveSession,
+  WORKER_URL,
+  type SessionContext,
+} from "../contract/session";
 
 // ── Tools / palette / status ────────────────────────────────────────────
 //
@@ -58,7 +63,7 @@ const ZOOM_MIN  = 1;
 
 // Speech-bubble paper + accent. Held constant (cream + cinnabar) so the
 // bubble keeps its sticky-note feel regardless of the surrounding theme.
-const BUBBLE_PAPER  = "#FAF7F0";
+const BUBBLE_PAPER  = "#F8F6F3";
 const BUBBLE_ACCENT = "#C7321B";
 
 interface Draft {
@@ -70,21 +75,24 @@ interface Draft {
   points: { x: number; y: number }[];
 }
 
-// Serverless proxy that posts the review comment to ClickUp (see
-// worker/clickup-proxy.js). Empty until deployed → "Concluir" falls back to a
-// copy/paste. Set this to the deployed Worker URL to post directly to ClickUp.
-const WORKER_URL = "https://apollo-review-proxy.marconimpn.workers.dev";
+// WORKER_URL (the serverless backend) is defined in ../contract/session.
+// Empty → no server: "Concluir" falls back to a copy/paste link.
 
 export default function Editor({
   payload,
   readOnly = false,
+  session,
 }: {
   payload: ReviewPayload;
   /** When true: no markup toolbar, no composer, no canvas gestures,
-   *  no textBox / shape edit chrome. Used by the "Ver review" path
-   *  (`?z=`) so reviewers can re-read a posted review without
+   *  no textBox / shape edit chrome. Used by the legacy "Ver review"
+   *  path (`?z=`) so reviewers can re-read a posted review without
    *  drifting into edits. */
   readOnly?: boolean;
+  /** Present → the review is a LIVE server-backed document (the single
+   *  link): every change autosaves and "Concluir" edits the one ClickUp
+   *  comment in place. Absent → legacy self-contained behaviour. */
+  session?: SessionContext;
 }) {
   const kind = mediaKindFor(payload.ext);
   const timed = kind === "video" || kind === "audio";
@@ -100,7 +108,77 @@ export default function Editor({
   const [pending, setPending] = useState<Annotation[]>([]);
   const [body, setBody] = useState("");
   const [done, setDone] = useState<string | null>(null);
-  const [postedOk, setPostedOk] = useState(false);
+
+  /// ── Server-backed autosave (the single live link) ──────────────────────
+  /// When `session` is present, every change to the comments or status is
+  /// debounced and persisted to KV via the Worker, so "revisar" and "ver"
+  /// share one always-current link. `skipFirstSave` avoids re-saving the
+  /// state we just loaded.
+  const [saveState, setSaveState] =
+    useState<"idle" | "saving" | "saved" | "error">("idle");
+  const skipFirstSave = useRef(true);
+  useEffect(() => {
+    if (!session || !WORKER_URL) return;
+    if (skipFirstSave.current) {
+      skipFirstSave.current = false;
+      return;
+    }
+    setSaveState("saving");
+    const t = setTimeout(() => {
+      saveSession({
+        reviewId: session.reviewId,
+        versionId: session.versionId,
+        status,
+        comments,
+      })
+        .then(() => setSaveState("saved"))
+        .catch(() => setSaveState("error"));
+    }, 800);
+    return () => clearTimeout(t);
+  }, [comments, status, session]);
+
+  /// Reviewer identity — captured client-side via the "Você é:"
+  /// input below the composer, persisted in localStorage. The web
+  /// posts via the worker using the workspace owner's pk_ token,
+  /// so ClickUp's byline is always the owner — the reviewer's
+  /// name has to ride INSIDE the comment body so attribution is
+  /// preserved at all. Each ReviewComment also carries the name
+  /// so `summarize()` can prefix the posted summary with
+  /// "Review por X".
+  const REVIEWER_KEY = "apollo_review_reviewer_name";
+  const [reviewerName, setReviewerName] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    return (window.localStorage.getItem(REVIEWER_KEY) || "").trim();
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (reviewerName.trim()) {
+      window.localStorage.setItem(REVIEWER_KEY, reviewerName.trim());
+    }
+  }, [reviewerName]);
+  const reviewerReady = reviewerName.trim().length > 0;
+  const reviewerId    = 0;   // unknown — comments ride the workspace owner's token
+
+  /// Tick / untick a comment's checkbox. The executor resolves each feedback
+  /// item in the same live link; attribution rides the reviewer name. The
+  /// autosave effect above pushes the change to the server.
+  const toggleResolved = useCallback(
+    (id: string) => {
+      setComments((prev) =>
+        prev.map((c) => {
+          if (c.id !== id) return c;
+          const next = !c.resolved;
+          return {
+            ...c,
+            resolved: next,
+            resolvedByName: next ? reviewerName.trim() || null : null,
+            resolvedAt: next ? new Date().toISOString() : null,
+          };
+        }),
+      );
+    },
+    [reviewerName],
+  );
 
   /// Currently-selected annotation (shape OR textBox), or null. Drives the
   /// dashed selection outline + the Delete key target.
@@ -339,8 +417,10 @@ export default function Editor({
       id: commentId,
       reviewId: payload.taskId || "web",
       versionId: "v1",
-      authorClickupId: payload.uploaderId ?? 0,
-      authorName: "Revisor",
+      // No ClickUp id for the reviewer (they aren't necessarily in
+      // the workspace); the BODY carries the human-readable name.
+      authorClickupId: reviewerId,
+      authorName: reviewerName || "Revisor",
       body: "",
       anchor: buildAnchor(),
       parentId: null,
@@ -391,8 +471,8 @@ export default function Editor({
       id: commentId,
       reviewId: payload.taskId || "web",
       versionId: "v1",
-      authorClickupId: payload.uploaderId ?? 0,
-      authorName: "Revisor",
+      authorClickupId: reviewerId,
+      authorName: reviewerName || "Revisor",
       body: "",
       anchor: timed ? { kind: "video", timeMs: liveTimeMs() } : { kind: "image" },
       parentId: null,
@@ -467,13 +547,14 @@ export default function Editor({
 
   // ── Comment composer (non-textBox flow, kept for timed media rail) ─────
   const addComment = () => {
+    if (!reviewerReady) return;
     if (!body.trim() && pending.length === 0) return;
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     const anns = pending.map((a) => ({ ...a, commentId: id }));
     const c: ReviewComment = {
       id, reviewId: payload.taskId || "web", versionId: "v1",
-      authorClickupId: payload.uploaderId ?? 0, authorName: "Revisor",
+      authorClickupId: reviewerId, authorName: reviewerName || "Revisor",
       body: body.trim(), anchor: buildAnchor(),
       parentId: null, resolved: false, annotations: anns,
       createdAt: now, updatedAt: now,
@@ -796,39 +877,42 @@ export default function Editor({
     window.addEventListener("pointerup", up);
   };
 
-  // ── Finish → POST directly to ClickUp via the serverless proxy ─────────
+  // ── Finish → persist + surface the review in ClickUp ───────────────────
   const finish = async () => {
     const out: ReviewPayload = {
       ...payload, status, comments,
-      summaryText: summarize(comments, status, payload.mediaTitle),
+      summaryText: summarize(comments, status, payload.mediaTitle, reviewerName),
     };
+
+    // ── Server-backed (the single live link) ──
+    // The markup is already autosaved. The link reviewers/uploader hold IS
+    // this page, so concluding mints NOTHING new — it just flushes the latest
+    // state (status flipped) and shows that same link. Notifying the creator
+    // is the Apollo side's job (see CONTRACT.md), not ClickUp from here.
+    if (session && WORKER_URL) {
+      const viewerLink = window.location.href;
+      try {
+        await saveSession({
+          reviewId: session.reviewId,
+          versionId: session.versionId,
+          status,
+          comments,
+        });
+        setSaveState("saved");
+      } catch {
+        setSaveState("error");
+      }
+      setDone(viewerLink);
+      try { await navigator.clipboard.writeText(viewerLink); } catch { /* manual copy */ }
+      return;
+    }
+
+    // ── Legacy self-contained (no backend) → mint a `?z=` link as before ──
     const z = await encodeInlinePayload(out);
     const base = window.location.origin + window.location.pathname.replace(/index\.html$/, "");
     const viewerLink = `${base}?z=${z}`;
-    const segments: Array<Record<string, unknown>> = [];
-    if (out.uploaderId) {
-      const name = out.uploaderName ? `@${out.uploaderName}` : "@";
-      segments.push({ text: name, type: "tag", user: { id: out.uploaderId } });
-      segments.push({ text: "\n" });
-    }
-    segments.push({ text: `${out.summaryText}\n\n▶ ` });
-    segments.push({ text: "VER REVIEW", attributes: { link: viewerLink } });
-    const pasteText = `${out.summaryText}\n\n▶ VER REVIEW: ${viewerLink}`;
-
-    if (WORKER_URL && out.taskId) {
-      try {
-        const r = await fetch(WORKER_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ taskId: out.taskId, segments, assignee: out.uploaderId ?? undefined }),
-        });
-        const data = await r.json();
-        if (r.ok && data.ok) { setPostedOk(true); setDone(""); return; }
-      } catch { /* fall through to paste */ }
-    }
-    setPostedOk(false);
-    setDone(pasteText);
-    try { await navigator.clipboard.writeText(pasteText); } catch { /* manual copy */ }
+    setDone(viewerLink);
+    try { await navigator.clipboard.writeText(viewerLink); } catch { /* manual copy */ }
   };
 
   const ordered = useMemo(() => {
@@ -1128,9 +1212,25 @@ export default function Editor({
             document) comments live as on-canvas text bubbles. */}
         {timed && (
           <aside className="vw-rail">
-            {/* Header — count chip at the top, matches Swift's FolioBar. */}
+            {/* Header — count chip + resolve progress + autosave state. */}
             <div className="vw-rail-head">
-              <strong>{comments.length}</strong> comentário{comments.length === 1 ? "" : "s"}
+              <span className="vw-rail-count">
+                <strong>{comments.length}</strong> comentário{comments.length === 1 ? "" : "s"}
+              </span>
+              {comments.length > 0 && (
+                <span className="vw-rail-progress">
+                  {comments.filter((c) => c.resolved).length}/{comments.length} resolvidos
+                </span>
+              )}
+              {session && saveState !== "idle" && (
+                <span className={`vw-save vw-save-${saveState}`}>
+                  {saveState === "saving"
+                    ? "salvando…"
+                    : saveState === "saved"
+                      ? "✓ salvo"
+                      : "erro ao salvar"}
+                </span>
+              )}
             </div>
             {/* List fills the middle — scrolls when overflowing. */}
             <div className="vw-rail-list">
@@ -1146,6 +1246,23 @@ export default function Editor({
                   className={`vw-comment${selectedCommentId === c.id ? " is-selected" : ""}${c.resolved ? " is-resolved" : ""}`}
                   key={c.id}
                 >
+                  {/* Resolve checkbox — the executor ticks each feedback item
+                      done in this same live link. Read-only legacy links show
+                      the state but can't change it. */}
+                  <button
+                    type="button"
+                    className={`vw-check${c.resolved ? " on" : ""}`}
+                    onClick={() => toggleResolved(c.id)}
+                    disabled={readOnly}
+                    aria-pressed={c.resolved}
+                    title={
+                      c.resolved
+                        ? `Resolvido${c.resolvedByName ? ` por ${c.resolvedByName}` : ""} — clique para reabrir`
+                        : "Marcar como resolvido"
+                    }
+                  >
+                    {c.resolved ? "✓" : ""}
+                  </button>
                   <button className="vw-comment-main" onClick={() => seek(c)}>
                     <div className="vw-comment-meta">
                       {c.anchor.kind === "video" && <span className="vw-stamp">{anchorLabel(c)}</span>}
@@ -1163,17 +1280,35 @@ export default function Editor({
                 reads as one input. Hidden in read-only. */}
             {!readOnly && (
               <div className="ed-composer">
+                {/* Reviewer identification row. The proxy posts to ClickUp
+                    via the workspace owner's API token, so the visible
+                    ClickUp byline is always the owner — but every saved
+                    comment + the posted summary stamp this name so the
+                    actual reviewer is preserved. Persisted to localStorage. */}
+                <div className="ed-reviewer-row">
+                  <span className="ed-reviewer-label">Você é:</span>
+                  <input
+                    type="text"
+                    className="ed-reviewer-input"
+                    placeholder="seu nome (obrigatório p/ comentar)"
+                    value={reviewerName}
+                    onChange={(e) => setReviewerName(e.target.value)}
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </div>
                 <div className="ed-composer-row">
                   <textarea
                     ref={composerRef}
                     className="ed-text"
-                    placeholder="Comentar…"
+                    placeholder={reviewerReady ? "Comentar…" : "Identifique-se acima para comentar…"}
                     value={body}
                     onChange={(e) => setBody(e.target.value)}
+                    disabled={!reviewerReady}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
-                        addComment();
+                        if (reviewerReady) addComment();
                       }
                     }}
                     rows={2}
@@ -1196,7 +1331,7 @@ export default function Editor({
                       type="button"
                       className="ed-add ed-add-compact"
                       onClick={addComment}
-                      disabled={!body.trim() && pending.length === 0}
+                      disabled={!reviewerReady || (!body.trim() && pending.length === 0)}
                       title="Adicionar comentário (Enter)"
                     >
                       {(inMs !== null && outMs !== null && outMs > inMs)
@@ -1228,18 +1363,14 @@ export default function Editor({
         <div className="ed-modal" onClick={() => setDone(null)}>
           <div className="ed-modal-card" onClick={(e) => e.stopPropagation()}>
             <span className="vw-brand">Review concluído</span>
-            {postedOk ? (
-              <p className="vw-muted">✓ Comentário postado no ClickUp.</p>
-            ) : (
-              <>
-                <p className="vw-muted">Copie e cole como comentário na tarefa do ClickUp:</p>
-                <textarea className="ed-done" readOnly value={done} rows={6} onFocus={(e) => e.currentTarget.select()} />
-              </>
-            )}
+            <p className="vw-muted">
+              {session
+                ? "Tudo salvo. Este é o link do review — o mesmo botão REVIEW na task abre aqui:"
+                : "Copie este link para compartilhar o review:"}
+            </p>
+            <textarea className="ed-done" readOnly value={done} rows={4} onFocus={(e) => e.currentTarget.select()} />
             <div className="ed-modal-actions">
-              {!postedOk && (
-                <button className="ed-add" onClick={() => navigator.clipboard.writeText(done)}>Copiar de novo</button>
-              )}
+              <button className="ed-add" onClick={() => navigator.clipboard.writeText(done)}>Copiar link</button>
               <button className="ed-clear" onClick={() => setDone(null)}>Fechar</button>
             </div>
           </div>
@@ -1297,7 +1428,7 @@ function GuideRect({ ratio }: { ratio: number }) {
   return (
     <rect
       x={x} y={y} width={rectW} height={rectH}
-      fill="none" stroke="#FAF7F0" strokeOpacity={0.92} strokeWidth={0.4}
+      fill="none" stroke="#F8F6F3" strokeOpacity={0.92} strokeWidth={0.4}
       strokeDasharray="2 1.5"
     />
   );
@@ -2187,17 +2318,30 @@ function fmt(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-function summarize(comments: ReviewComment[], status: string, title: string): string {
+function summarize(
+  comments: ReviewComment[],
+  status: string,
+  title: string,
+  reviewerName: string = "",
+): string {
   const total = comments.length;
   const resolved = comments.filter((c) => c.resolved).length;
   const label = status === "approved" ? "Aprovado"
     : status === "changes_requested" ? "Pede alterações" : "Em revisão";
   const lines: string[] = [];
   if (title) lines.push(title);
-  lines.push(`📝 Review (${label}) — ${total} comentário(s), ${resolved} resolvido(s):`);
+  // The web review posts back to ClickUp via the workspace-owner's API
+  // token, so the ClickUp avatar/byline of the resulting comment is
+  // ALWAYS the owner — never the reviewer. Prepending "Review por X"
+  // is the only honest attribution the body can carry.
+  const author = reviewerName.trim();
+  const byline = author ? ` por ${author}` : "";
+  lines.push(`📝 Review${byline} (${label}) — ${total} comentário(s), ${resolved} resolvido(s):`);
   for (const c of comments) {
     const mark = c.annotations.length ? " ✎" : "";
-    lines.push(`• [${anchorLabel(c)}]${mark} ${c.body || "(marcação)"}`);
+    const who = c.authorName && c.authorName !== "Revisor" && c.authorName !== author
+      ? `${c.authorName} · ` : "";
+    lines.push(`• [${anchorLabel(c)}]${mark} ${who}${c.body || "(marcação)"}`);
   }
   return lines.join("\n");
 }
