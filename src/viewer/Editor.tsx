@@ -890,7 +890,6 @@ export default function Editor({
     // state (status flipped) and shows that same link. Notifying the creator
     // is the Apollo side's job (see CONTRACT.md), not ClickUp from here.
     if (session && WORKER_URL) {
-      const viewerLink = window.location.href;
       try {
         await saveSession({
           reviewId: session.reviewId,
@@ -902,8 +901,9 @@ export default function Editor({
       } catch {
         setSaveState("error");
       }
-      setDone(viewerLink);
-      try { await navigator.clipboard.writeText(viewerLink); } catch { /* manual copy */ }
+      // Single live link: nothing to copy — this very page IS the link (the
+      // REVIEW button in the task already points here). Just confirm.
+      setDone("");
       return;
     }
 
@@ -1363,14 +1363,20 @@ export default function Editor({
         <div className="ed-modal" onClick={() => setDone(null)}>
           <div className="ed-modal-card" onClick={(e) => e.stopPropagation()}>
             <span className="vw-brand">Review concluído</span>
-            <p className="vw-muted">
-              {session
-                ? "Tudo salvo. Este é o link do review — o mesmo botão REVIEW na task abre aqui:"
-                : "Copie este link para compartilhar o review:"}
-            </p>
-            <textarea className="ed-done" readOnly value={done} rows={4} onFocus={(e) => e.currentTarget.select()} />
+            {session ? (
+              // Single live link: it's the same URL, already in the task as the
+              // REVIEW button — nothing to copy.
+              <p className="vw-muted">✓ Tudo salvo neste mesmo link. Quem abrir o REVIEW na task vê a versão atual.</p>
+            ) : (
+              <>
+                <p className="vw-muted">Copie este link para compartilhar o review:</p>
+                <textarea className="ed-done" readOnly value={done} rows={4} onFocus={(e) => e.currentTarget.select()} />
+              </>
+            )}
             <div className="ed-modal-actions">
-              <button className="ed-add" onClick={() => navigator.clipboard.writeText(done)}>Copiar link</button>
+              {!session && (
+                <button className="ed-add" onClick={() => navigator.clipboard.writeText(done)}>Copiar link</button>
+              )}
               <button className="ed-clear" onClick={() => setDone(null)}>Fechar</button>
             </div>
           </div>
