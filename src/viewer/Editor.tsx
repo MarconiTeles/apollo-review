@@ -8,8 +8,10 @@ import {
   type ReviewPayload,
 } from "./payload";
 import {
+  concludeSession,
   saveSession,
   WORKER_URL,
+  type ReviewVersionState,
   type SessionContext,
 } from "../contract/session";
 
@@ -20,8 +22,8 @@ import {
 // of accidentally drawing on top of them.
 
 type Tool = "select" | "rect" | "ellipse" | "arrow" | "line" | "freehand" | "text";
-const TOOLS: { id: Tool; label: string; glyph: string }[] = [
-  { id: "select", label: "Selecionar", glyph: "↖" },
+const TOOLS: { id: Tool; label: string; glyph?: string; icon?: "pointer" }[] = [
+  { id: "select", label: "Selecionar", icon: "pointer" },
   { id: "rect", label: "Retângulo", glyph: "▭" },
   { id: "ellipse", label: "Elipse", glyph: "◯" },
   { id: "arrow", label: "Seta", glyph: "↗" },
@@ -29,7 +31,7 @@ const TOOLS: { id: Tool; label: string; glyph: string }[] = [
   { id: "freehand", label: "Livre", glyph: "✎" },
   { id: "text", label: "Texto", glyph: "T" },
 ];
-const COLORS = ["#C7321B", "#1E6Fd9", "#3F7D4E", "#E0A100", "#14130F", "#FFFFFF"];
+const COLORS = ["#7C5CFF", "#9B7FFF", "#6FB585", "#D4B860", "#E8E8EA", "#0A0A0B"];
 
 // Stroke-width presets (× the displayed stage width).
 const STROKES = [
@@ -61,10 +63,9 @@ const ZOOM_STEP = 1.25;
 const ZOOM_MAX  = 8;
 const ZOOM_MIN  = 1;
 
-// Speech-bubble paper + accent. Held constant (cream + cinnabar) so the
-// bubble keeps its sticky-note feel regardless of the surrounding theme.
-const BUBBLE_PAPER  = "#F8F6F3";
-const BUBBLE_ACCENT = "#C7321B";
+// Speech-bubble surface + accent, aligned with Galileo Studio Dark.
+const BUBBLE_PAPER  = "#1C1C1D";
+const BUBBLE_ACCENT = "#7C5CFF";
 
 interface Draft {
   tool: Tool;
@@ -73,6 +74,21 @@ interface Draft {
   start: { x: number; y: number };
   cur: { x: number; y: number };
   points: { x: number; y: number }[];
+}
+
+const HISTORY_LIMIT = 80;
+
+function reviewStateFingerprint(status: string, comments: ReviewComment[]): string {
+  return JSON.stringify({ status, comments });
+}
+
+interface ReviewEditSnapshot {
+  status: string;
+  comments: ReviewComment[];
+  pending: Annotation[];
+  pendingFrameMs: number | null;
+  selectedId: string | null;
+  selectedCommentId: string | null;
 }
 
 // WORKER_URL (the serverless backend) is defined in ../contract/session.
@@ -94,7 +110,18 @@ export default function Editor({
    *  comment in place. Absent → legacy self-contained behaviour. */
   session?: SessionContext;
 }) {
-  const kind = mediaKindFor(payload.ext);
+  const initialVersionId =
+    session?.versionId || payload.versionId || session?.versions?.[session.versions.length - 1]?.versionId || "v1";
+  const [selectedVersionId, setSelectedVersionId] = useState(initialVersionId);
+  const [versionStates, setVersionStates] = useState<Record<string, ReviewVersionState>>(() =>
+    initialVersionStates(session, payload, initialVersionId),
+  );
+  const activeVersion = session?.versions?.find((v) => v.versionId === selectedVersionId)
+    || session?.versions?.[session.versions.length - 1];
+  const activeMediaUrl = activeVersion?.mediaUrl || payload.mediaUrl;
+  const activeMediaTitle = activeVersion?.mediaTitle || payload.mediaTitle;
+  const activeExt = activeVersion?.ext || payload.ext;
+  const kind = activeVersion?.mediaKind || mediaKindFor(activeExt);
   const timed = kind === "video" || kind === "audio";
 
   const [tool, setTool] = useState<Tool>("select");
@@ -102,43 +129,82 @@ export default function Editor({
   const [strokeId, setStrokeId] = useState<StrokeChoice>("medium");
   const strokeValue = STROKES.find((s) => s.id === strokeId)!.value;
 
-  const [status, setStatus] = useState(payload.status || "in_review");
+  const [status, setStatus] = useState(
+    versionStates[initialVersionId]?.status || payload.status || "in_review",
+  );
   const [currentMs, setCurrentMs] = useState(0);
-  const [comments, setComments] = useState<ReviewComment[]>(payload.comments ?? []);
+  const [comments, setComments] = useState<ReviewComment[]>(() =>
+    cloneComments(versionStates[initialVersionId]?.comments ?? payload.comments ?? []),
+  );
+  const [deletingCommentIds, setDeletingCommentIds] = useState<Set<string>>(() => new Set());
   const [pending, setPending] = useState<Annotation[]>([]);
   const [body, setBody] = useState("");
   const [done, setDone] = useState<string | null>(null);
+  const [nameDialogOpen, setNameDialogOpen] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const nameInputRef = useRef<HTMLInputElement>(null);
 
   /// ── Server-backed autosave (the single live link) ──────────────────────
   /// When `session` is present, every change to the comments or status is
   /// debounced and persisted to KV via the Worker, so "revisar" and "ver"
-  /// share one always-current link. `skipFirstSave` avoids re-saving the
-  /// state we just loaded.
+  /// share one always-current link. Navigation and lifecycle changes (open,
+  /// close, selecting the already-active version, remount) are NOT edits and
+  /// must never write. We therefore compare the current editor payload with
+  /// the last payload actually loaded/saved instead of relying on effect-call
+  /// order.
   const [saveState, setSaveState] =
     useState<"idle" | "saving" | "saved" | "error">("idle");
-  const skipFirstSave = useRef(true);
+  const lastPersistedReviewFingerprints = useRef<Record<string, string>>(
+    Object.fromEntries(
+      Object.entries(versionStates).map(([versionId, state]) => [
+        versionId,
+        reviewStateFingerprint(state.status, state.comments),
+      ]),
+    ),
+  );
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Keep an in-memory snapshot for every media version. Switching the video
+  // must never keep the previous version's comments/status mounted.
+  useEffect(() => {
+    setVersionStates((current) => ({
+      ...current,
+      [selectedVersionId]: {
+        ...current[selectedVersionId],
+        status,
+        comments: cloneComments(comments),
+      },
+    }));
+  }, [comments, selectedVersionId, status]);
+
   useEffect(() => {
     if (!session || !WORKER_URL) return;
-    if (skipFirstSave.current) {
-      skipFirstSave.current = false;
-      return;
-    }
+    const fingerprint = reviewStateFingerprint(status, comments);
+    if (fingerprint === lastPersistedReviewFingerprints.current[selectedVersionId]) return;
     setSaveState("saving");
     const t = setTimeout(() => {
+      saveTimerRef.current = null;
       saveSession({
         reviewId: session.reviewId,
-        versionId: session.versionId,
+        versionId: selectedVersionId,
         status,
         comments,
       })
-        .then(() => setSaveState("saved"))
+        .then(() => {
+          lastPersistedReviewFingerprints.current[selectedVersionId] = fingerprint;
+          setSaveState("saved");
+        })
         .catch(() => setSaveState("error"));
     }, 800);
-    return () => clearTimeout(t);
-  }, [comments, status, session]);
+    saveTimerRef.current = t;
+    return () => {
+      clearTimeout(t);
+      if (saveTimerRef.current === t) saveTimerRef.current = null;
+    };
+  }, [comments, status, session, selectedVersionId]);
 
-  /// Reviewer identity — captured client-side via the "Você é:"
-  /// input below the composer, persisted in localStorage. The web
+  /// Reviewer identity — captured client-side in the name dialog and
+  /// persisted in localStorage. The web
   /// posts via the worker using the workspace owner's pk_ token,
   /// so ClickUp's byline is always the owner — the reviewer's
   /// name has to ride INSIDE the comment body so attribution is
@@ -159,11 +225,148 @@ export default function Editor({
   const reviewerReady = reviewerName.trim().length > 0;
   const reviewerId    = 0;   // unknown — comments ride the workspace owner's token
 
+  const requestReviewerName = useCallback(() => {
+    setNameDraft(reviewerName.trim());
+    setNameDialogOpen(true);
+  }, [reviewerName]);
+
+  useEffect(() => {
+    if (!nameDialogOpen) return;
+    const t = window.setTimeout(() => nameInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(t);
+  }, [nameDialogOpen]);
+
+  const confirmReviewerName = useCallback(() => {
+    const next = nameDraft.trim();
+    if (!next) return;
+    setReviewerName(next);
+    window.localStorage.setItem(REVIEWER_KEY, next);
+    setNameDialogOpen(false);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }, [nameDraft]);
+
+  /// Currently-selected annotation (shape OR textBox), or null. Drives the
+  /// dashed selection outline + the Delete key target.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  /// Currently-selected COMMENT in the rail (separate from the shape
+  /// selection above). Drives the accent wash on the comment row,
+  /// matching Swift's `review.selectedCommentId`.
+  const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null);
+
+  /// Pixel offset applied to the markup toolbar so the user can drag it
+  /// out of the way of the artwork they're reviewing.
+  const [toolbarOffset, setToolbarOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  /// While the media (video) is still buffering / not ready, show an
+  /// Apollo Review splash over the stage instead of a blank canvas.
+  const [mediaLoading, setMediaLoading] = useState<boolean>(kind === "video");
+  const [splashElapsed, setSplashElapsed] = useState<boolean>(kind !== "video");
+  const [splashVisible, setSplashVisible] = useState<boolean>(kind === "video");
+  const [splashLeaving, setSplashLeaving] = useState(false);
+
+  /// Pending shapes (mid-draw, not yet committed) belong to a single
+  /// frame. Without this filter they'd float through every other frame
+  /// of the video.
+  const [pendingFrameMs, setPendingFrameMs] = useState<number | null>(null);
+
+  const [undoStack, setUndoStack] = useState<ReviewEditSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<ReviewEditSnapshot[]>([]);
+
+  const selectVersion = useCallback(async (nextVersionId: string) => {
+    if (nextVersionId === selectedVersionId) return;
+
+    if (saveTimerRef.current !== null) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+
+    // Flush the version being left before replacing the mounted editor state.
+    // Without this, the debounce cleanup can discard a real edit on switch.
+    if (session && WORKER_URL) {
+      const fingerprint = reviewStateFingerprint(status, comments);
+      if (fingerprint !== lastPersistedReviewFingerprints.current[selectedVersionId]) {
+        setSaveState("saving");
+        try {
+          await saveSession({
+            reviewId: session.reviewId,
+            versionId: selectedVersionId,
+            status,
+            comments,
+          });
+          lastPersistedReviewFingerprints.current[selectedVersionId] = fingerprint;
+          setSaveState("saved");
+        } catch {
+          setSaveState("error");
+          return;
+        }
+      }
+    }
+
+    const target = versionStates[nextVersionId]
+      ?? session?.versionStates?.[nextVersionId]
+      ?? { status: "in_review", comments: [] };
+    lastPersistedReviewFingerprints.current[nextVersionId] ??=
+      reviewStateFingerprint(target.status, target.comments);
+    setSelectedVersionId(nextVersionId);
+    setStatus(target.status);
+    setComments(cloneComments(target.comments));
+    setSelectedId(null);
+    setSelectedCommentId(null);
+    setPending([]);
+    setPendingFrameMs(null);
+    setUndoStack([]);
+    setRedoStack([]);
+  }, [comments, selectedVersionId, session, status, versionStates]);
+
+  const currentSnapshot = useCallback((): ReviewEditSnapshot => ({
+    status,
+    comments: cloneComments(comments),
+    pending: cloneAnnotations(pending),
+    pendingFrameMs,
+    selectedId,
+    selectedCommentId,
+  }), [comments, pending, pendingFrameMs, selectedCommentId, selectedId, status]);
+
+  const restoreSnapshot = useCallback((snapshot: ReviewEditSnapshot) => {
+    setDeletingCommentIds(new Set());
+    setStatus(snapshot.status);
+    setComments(cloneComments(snapshot.comments));
+    setPending(cloneAnnotations(snapshot.pending));
+    setPendingFrameMs(snapshot.pendingFrameMs);
+    setSelectedId(snapshot.selectedId);
+    setSelectedCommentId(snapshot.selectedCommentId);
+  }, []);
+
+  const pushUndoSnapshot = useCallback(() => {
+    const snapshot = currentSnapshot();
+    setUndoStack((prev) => [...prev.slice(-(HISTORY_LIMIT - 1)), snapshot]);
+    setRedoStack([]);
+  }, [currentSnapshot]);
+
+  const undoEdit = useCallback(() => {
+    const snapshot = undoStack[undoStack.length - 1];
+    if (!snapshot) return;
+    setUndoStack((prev) => prev.slice(0, -1));
+    setRedoStack((prev) => [...prev.slice(-(HISTORY_LIMIT - 1)), currentSnapshot()]);
+    restoreSnapshot(snapshot);
+  }, [currentSnapshot, restoreSnapshot, undoStack]);
+
+  const redoEdit = useCallback(() => {
+    const snapshot = redoStack[redoStack.length - 1];
+    if (!snapshot) return;
+    setRedoStack((prev) => prev.slice(0, -1));
+    setUndoStack((prev) => [...prev.slice(-(HISTORY_LIMIT - 1)), currentSnapshot()]);
+    restoreSnapshot(snapshot);
+  }, [currentSnapshot, redoStack, restoreSnapshot]);
+
   /// Tick / untick a comment's checkbox. The executor resolves each feedback
   /// item in the same live link; attribution rides the reviewer name. The
   /// autosave effect above pushes the change to the server.
   const toggleResolved = useCallback(
     (id: string) => {
+      if (!comments.some((c) => c.id === id)) return;
+      pushUndoSnapshot();
       setComments((prev) =>
         prev.map((c) => {
           if (c.id !== id) return c;
@@ -177,39 +380,8 @@ export default function Editor({
         }),
       );
     },
-    [reviewerName],
+    [comments, pushUndoSnapshot, reviewerName],
   );
-
-  /// Currently-selected annotation (shape OR textBox), or null. Drives the
-  /// dashed selection outline + the Delete key target.
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  /// Currently-selected COMMENT in the rail (separate from the shape
-  /// selection above). Drives the cinnabar wash on the comment row,
-  /// matching Swift's `review.selectedCommentId`.
-  const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null);
-
-  /// Pixel offset applied to the markup toolbar so the user can drag it
-  /// out of the way of the artwork they're reviewing.
-  const [toolbarOffset, setToolbarOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-
-  /// While the media (video) is still buffering / not ready, show a
-  /// "Carregando…" overlay over the stage instead of a blank canvas.
-  const [mediaLoading, setMediaLoading] = useState<boolean>(kind === "video");
-
-  /// Pending shapes (mid-draw, not yet committed) belong to a single
-  /// frame. Without this filter they'd float through every other frame
-  /// of the video.
-  const [pendingFrameMs, setPendingFrameMs] = useState<number | null>(null);
-
-  /// Redo stack — populated when the user hits ⌘Z, drained on ⌘⇧Z.
-  /// Each entry carries either the popped pending shape (we can push
-  /// it back to `pending`) or a popped textBox-owned comment (we can
-  /// re-insert it into `comments`).
-  type RedoEntry =
-    | { kind: "pending"; annotation: Annotation; frameMs: number | null }
-    | { kind: "comment"; index: number; comment: ReviewComment };
-  const [redoStack, setRedoStack] = useState<RedoEntry[]>([]);
 
   // ── Transport / range / zoom / guides (parity with the Swift app) ──────
   const [durationMs, setDurationMs] = useState(0);
@@ -248,6 +420,7 @@ export default function Editor({
   const [speed, setSpeed] = useState(1);
 
   const videoRef    = useRef<HTMLVideoElement>(null);
+  const reverseTimer = useRef<number | null>(null);
   const imgRef      = useRef<HTMLImageElement>(null);
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const stageRef    = useRef<HTMLDivElement>(null);
@@ -255,6 +428,71 @@ export default function Editor({
   const draftRef    = useRef<Draft | null>(null);
   const toolbarRef  = useRef<HTMLDivElement>(null);   // for raw-DOM drag
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [stageBoxSize, setStageBoxSize] = useState({ w: 0, h: 0 });
+  const [detectedMediaSize, setDetectedMediaSize] = useState<{ w: number; h: number } | null>(null);
+
+  const clearReverse = useCallback(() => {
+    if (reverseTimer.current !== null) {
+      window.clearInterval(reverseTimer.current);
+      reverseTimer.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (kind !== "video") {
+      setMediaLoading(false);
+      setSplashElapsed(true);
+      setSplashVisible(false);
+      setSplashLeaving(false);
+      return;
+    }
+    setMediaLoading(true);
+    setSplashElapsed(false);
+    setSplashVisible(true);
+    setSplashLeaving(false);
+    const t = window.setTimeout(() => setSplashElapsed(true), 2000);
+    return () => window.clearTimeout(t);
+  }, [kind, activeMediaUrl]);
+
+  const shouldKeepSplash = kind === "video" && (!splashElapsed || mediaLoading);
+
+  useEffect(() => {
+    if (kind !== "video") return;
+    if (shouldKeepSplash) {
+      setSplashVisible(true);
+      setSplashLeaving(false);
+      return;
+    }
+    if (!splashVisible || splashLeaving) return;
+    setSplashLeaving(true);
+    const t = window.setTimeout(() => setSplashVisible(false), 520);
+    return () => window.clearTimeout(t);
+  }, [kind, shouldKeepSplash, splashLeaving, splashVisible]);
+
+  const payloadMediaSize = useMemo(() => {
+    const w = positiveSize(payload.mediaWidth ?? payload.width);
+    const h = positiveSize(payload.mediaHeight ?? payload.height);
+    return w && h ? { w, h } : null;
+  }, [payload.height, payload.mediaHeight, payload.mediaWidth, payload.width]);
+
+  const effectiveMediaSize = payloadMediaSize ?? detectedMediaSize;
+
+  const mediaBoxStyle = useMemo(() => {
+    if (!effectiveMediaSize || stageBoxSize.w <= 0 || stageBoxSize.h <= 0) return undefined;
+    const r = fitRect(stageBoxSize.w, stageBoxSize.h, effectiveMediaSize.w, effectiveMediaSize.h);
+    return { width: `${r.w}px`, height: `${r.h}px` };
+  }, [effectiveMediaSize, stageBoxSize]);
+
+  const rememberMediaSize = useCallback((media: HTMLVideoElement | HTMLImageElement | null) => {
+    if (!media || payloadMediaSize) return;
+    const w = kind === "image"
+      ? (media as HTMLImageElement).naturalWidth
+      : (media as HTMLVideoElement).videoWidth;
+    const h = kind === "image"
+      ? (media as HTMLImageElement).naturalHeight
+      : (media as HTMLVideoElement).videoHeight;
+    if (w > 0 && h > 0) setDetectedMediaSize({ w, h });
+  }, [kind, payloadMediaSize]);
 
   // ── Content rect: where the media actually paints inside its box ───────
   const contentRect = useCallback((): { rect: Rect; box: [number, number] } | null => {
@@ -263,14 +501,15 @@ export default function Editor({
     const canvas = canvasRef.current;
     if (!media || !canvas) return null;
     const boxW = media.clientWidth, boxH = media.clientHeight;
-    const iW = kind === "image"
+    const intrinsic = payloadMediaSize ?? detectedMediaSize;
+    const iW = intrinsic?.w ?? (kind === "image"
       ? (media as HTMLImageElement).naturalWidth
-      : (media as HTMLVideoElement).videoWidth;
-    const iH = kind === "image"
+      : (media as HTMLVideoElement).videoWidth);
+    const iH = intrinsic?.h ?? (kind === "image"
       ? (media as HTMLImageElement).naturalHeight
-      : (media as HTMLVideoElement).videoHeight;
+      : (media as HTMLVideoElement).videoHeight);
     return { rect: fitRect(boxW, boxH, iW, iH), box: [boxW, boxH] };
-  }, [kind]);
+  }, [detectedMediaSize, kind, payloadMediaSize]);
 
   const [stageRect, setStageRect] = useState<Rect | null>(null);
 
@@ -302,7 +541,7 @@ export default function Editor({
       if (!c.annotations.length) return [];
       if (c.anchor.kind === "video") {
         if (!timed) return [];
-        return Math.abs(c.anchor.timeMs - currentMs) <= 50 ? c.annotations : [];
+        return commentIsActiveAtMs(c, currentMs) ? c.annotations : [];
       }
       // image / general / document — no time axis, always painted.
       return c.annotations;
@@ -355,6 +594,16 @@ export default function Editor({
     window.addEventListener("resize", onWin);
     return () => { ro.disconnect(); window.removeEventListener("resize", onWin); };
   }, [kind]);
+
+  useLayoutEffect(() => {
+    const el = stageBoxRef.current;
+    if (!el) return;
+    const update = () => setStageBoxSize({ w: el.clientWidth, h: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // ── Pointer → normalised coords within the content rect ────────────────
   const toNorm = (e: React.PointerEvent | PointerEvent): { x: number; y: number } | null => {
@@ -413,10 +662,11 @@ export default function Editor({
     const commentId = crypto.randomUUID();
     ann.commentId = commentId;
     const now = new Date().toISOString();
+    pushUndoSnapshot();
     const c: ReviewComment = {
       id: commentId,
-      reviewId: payload.taskId || "web",
-      versionId: "v1",
+      reviewId: session?.reviewId ?? payload.taskId ?? "web",
+      versionId: selectedVersionId,
       // No ClickUp id for the reviewer (they aren't necessarily in
       // the workspace); the BODY carries the human-readable name.
       authorClickupId: reviewerId,
@@ -431,7 +681,6 @@ export default function Editor({
     };
     setComments((prev) => [...prev, c]);
     setSelectedId(ann.id);
-    setRedoStack([]);        // new edit invalidates the redo branch
     setTool("select");       // auto-revert after each placement
     clearRange();            // anchor consumed any active In/Out
   };
@@ -469,8 +718,8 @@ export default function Editor({
     };
     const c: ReviewComment = {
       id: commentId,
-      reviewId: payload.taskId || "web",
-      versionId: "v1",
+      reviewId: session?.reviewId ?? payload.taskId ?? "web",
+      versionId: selectedVersionId,
       authorClickupId: reviewerId,
       authorName: reviewerName || "Revisor",
       body: "",
@@ -481,9 +730,9 @@ export default function Editor({
       createdAt: now,
       updatedAt: now,
     };
+    pushUndoSnapshot();
     setComments((prev) => [...prev, c]);
     setSelectedId(id);
-    setRedoStack([]);   // new edit invalidates the redo branch
   };
 
   // ── Mutators used by the interactive layers ────────────────────────────
@@ -511,6 +760,10 @@ export default function Editor({
   }, []);
 
   const deleteAnnotation = useCallback((id: string) => {
+    const exists = pending.some((a) => a.id === id) ||
+      comments.some((c) => c.annotations.some((a) => a.id === id));
+    if (!exists) return;
+    pushUndoSnapshot();
     setPending((prev) => prev.filter((a) => a.id !== id));
     setComments((prev) => prev.flatMap((c) => {
       const i = c.annotations.findIndex((a) => a.id === id);
@@ -525,7 +778,31 @@ export default function Editor({
       return [{ ...c, annotations: anns }];
     }));
     setSelectedId((cur) => (cur === id ? null : cur));
-  }, []);
+  }, [comments, pending, pushUndoSnapshot]);
+
+  const deleteComment = useCallback((id: string) => {
+    const removedComments = comments.filter((c) => c.id === id || c.parentId === id);
+    const removedCommentIds = new Set(removedComments.map((c) => c.id));
+    const removedAnnotationIds = new Set(removedComments.flatMap((c) => c.annotations.map((a) => a.id)));
+    if (removedComments.length === 0 || removedComments.some((c) => deletingCommentIds.has(c.id))) return;
+
+    pushUndoSnapshot();
+    setDeletingCommentIds((prev) => {
+      const next = new Set(prev);
+      removedCommentIds.forEach((commentId) => next.add(commentId));
+      return next;
+    });
+    window.setTimeout(() => {
+      setComments((prev) => prev.filter((c) => !removedCommentIds.has(c.id) && c.parentId !== id));
+      setDeletingCommentIds((prev) => {
+        const next = new Set(prev);
+        removedCommentIds.forEach((commentId) => next.delete(commentId));
+        return next;
+      });
+      setSelectedCommentId((cur) => (cur && removedCommentIds.has(cur) ? null : cur));
+      setSelectedId((cur) => (cur && removedAnnotationIds.has(cur) ? null : cur));
+    }, 360);
+  }, [comments, deletingCommentIds, pushUndoSnapshot]);
 
   /// Picks the right anchor for a freshly-finalised comment:
   ///  • Static media → `image` anchor (no time axis).
@@ -547,18 +824,24 @@ export default function Editor({
 
   // ── Comment composer (non-textBox flow, kept for timed media rail) ─────
   const addComment = () => {
-    if (!reviewerReady) return;
+    if (!reviewerReady) {
+      requestReviewerName();
+      return;
+    }
     if (!body.trim() && pending.length === 0) return;
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     const anns = pending.map((a) => ({ ...a, commentId: id }));
     const c: ReviewComment = {
-      id, reviewId: payload.taskId || "web", versionId: "v1",
+      id,
+      reviewId: session?.reviewId ?? payload.taskId ?? "web",
+      versionId: selectedVersionId,
       authorClickupId: reviewerId, authorName: reviewerName || "Revisor",
       body: body.trim(), anchor: buildAnchor(),
       parentId: null, resolved: false, annotations: anns,
       createdAt: now, updatedAt: now,
     };
+    pushUndoSnapshot();
     setComments((prev) => [...prev, c]);
     setPending([]);
     setPendingFrameMs(null);
@@ -569,6 +852,10 @@ export default function Editor({
   const seek = (c: ReviewComment) => {
     setSelectedCommentId(c.id);              // highlight the row
     if (c.anchor.kind === "video" && videoRef.current) {
+      if (reverseTimer.current !== null) {
+        clearReverse();
+        setDisplayRate(0);
+      }
       videoRef.current.currentTime = c.anchor.timeMs / 1000;
       setCurrentMs(c.anchor.timeMs);
     }
@@ -577,38 +864,49 @@ export default function Editor({
   // ── Transport helpers (Frame.io / Swift PlayerModel parity) ────────────
   const togglePlay = useCallback(() => {
     const v = videoRef.current; if (!v) return;
-    if (v.paused) { v.playbackRate = 1; v.play(); setDisplayRate(1); }
-    else          { v.pause(); setDisplayRate(0); }
-  }, []);
+    if (displayRate < 0 || reverseTimer.current !== null) {
+      clearReverse();
+      v.pause();
+      setDisplayRate(0);
+      return;
+    }
+    if (v.paused) {
+      v.playbackRate = speed;
+      void v.play();
+      setDisplayRate(speed);
+    } else {
+      v.pause();
+      setDisplayRate(0);
+    }
+  }, [clearReverse, displayRate, speed]);
   const pause = useCallback(() => {
     const v = videoRef.current; if (!v) return;
+    clearReverse();
     v.pause(); setDisplayRate(0);
-  }, []);
+  }, [clearReverse]);
   const seekToMs = useCallback((ms: number) => {
     const v = videoRef.current; if (!v) return;
+    if (reverseTimer.current !== null) {
+      clearReverse();
+      setDisplayRate(0);
+    }
     const clamped = Math.max(0, durationMs > 0 ? Math.min(ms, durationMs) : ms);
     v.currentTime = clamped / 1000;
     setCurrentMs(clamped);
-  }, [durationMs]);
+  }, [clearReverse, durationMs]);
   /// Frame-accurate step (negative = back). Pauses first so the seek lands
   /// exactly on the target frame. Defaults to 30 fps when the source
   /// doesn't expose `videoFrameRate` — same fallback as Swift.
   const stepFrame = useCallback((count: number) => {
     const v = videoRef.current; if (!v) return;
+    clearReverse();
     v.pause(); setDisplayRate(0);
     const step = 1000 / (fps > 0 ? fps : 30);
     seekToMs(Math.round(v.currentTime * 1000) + Math.round(step * count));
-  }, [fps, seekToMs]);
+  }, [clearReverse, fps, seekToMs]);
   /// JKL shuttle: cycles 2× → 4× → 8× (or +1 with shift). Negative magnitudes
   /// play in reverse via repeated stepFrame(-1) at the desired interval,
   /// since HTML5 video doesn't natively support reverse playbackRate.
-  const reverseTimer = useRef<number | null>(null);
-  const clearReverse = () => {
-    if (reverseTimer.current !== null) {
-      window.clearInterval(reverseTimer.current);
-      reverseTimer.current = null;
-    }
-  };
   const shuttle = useCallback((reverse: boolean, incremental: boolean) => {
     const v = videoRef.current; if (!v) return;
     clearReverse();
@@ -631,15 +929,18 @@ export default function Editor({
         const nt = Math.max(0, v2.currentTime - stepMs / 1000);
         v2.currentTime = nt;
         setCurrentMs(Math.round(nt * 1000));
-        if (nt <= 0) clearReverse();
+        if (nt <= 0) {
+          clearReverse();
+          setDisplayRate(0);
+        }
       }, stepMs);
     } else {
       v.pause();
     }
     setDisplayRate(next);
-  }, [displayRate, fps]);
+  }, [clearReverse, displayRate, fps]);
   // Stop the reverse-shuttle timer on unmount.
-  useEffect(() => () => clearReverse(), []);
+  useEffect(() => () => clearReverse(), [clearReverse]);
 
   // ── Zoom helpers ───────────────────────────────────────────────────────
   const setZoom = useCallback((s: number) => {
@@ -704,6 +1005,11 @@ export default function Editor({
     if (vid.playbackRate > 0) vid.playbackRate = v;
   }, []);
 
+  const toggleApproval = useCallback(() => {
+    pushUndoSnapshot();
+    setStatus((current) => current === "approved" ? "in_review" : "approved");
+  }, [pushUndoSnapshot]);
+
   // ── Loop toggle (⌃L) ───────────────────────────────────────────────────
   const toggleLoop = useCallback(() => { setIsLooping((v) => !v); }, []);
 
@@ -717,8 +1023,12 @@ export default function Editor({
   // ── Focus the composer (C key) ─────────────────────────────────────────
   const focusComposer = useCallback(() => {
     pause();
+    if (!reviewerReady) {
+      requestReviewerName();
+      return;
+    }
     composerRef.current?.focus();
-  }, [pause]);
+  }, [pause, requestReviewerName, reviewerReady]);
 
   // ── Keyboard shortcuts (Frame.io V4 subset, matches Swift) ─────────────
   useEffect(() => {
@@ -746,33 +1056,8 @@ export default function Editor({
         if (inText && (e.key === "z" || e.key === "Z")) return;
         if (e.key === "z" || e.key === "Z") {
           e.preventDefault();
-          if (e.shiftKey) {
-            // ─── REDO ─────────────────────────────────────────────
-            // Pop the latest snapshot and splice the comment back in
-            // at the same position it was removed from.
-            const top = redoStack[redoStack.length - 1];
-            if (!top || top.kind !== "comment") return;
-            setRedoStack((s) => s.slice(0, -1));
-            setComments((cs) => {
-              const next = cs.slice();
-              next.splice(Math.min(top.index, next.length), 0, top.comment);
-              return next;
-            });
-            return;
-          }
-          // ─── UNDO ──────────────────────────────────────────────
-          // Walk backwards through `comments`, dropping the most
-          // recent body-less annotation comment (auto-created by a
-          // shape draw or textBox spawn). Body-text comments stay
-          // put — those need explicit deletion via the rail.
-          for (let i = comments.length - 1; i >= 0; i--) {
-            const c = comments[i];
-            if (!c.body.trim() && c.annotations.length > 0) {
-              setComments((cs) => cs.filter((_, j) => j !== i));
-              setRedoStack((s) => [...s, { kind: "comment", index: i, comment: c }]);
-              break;
-            }
-          }
+          if (e.shiftKey) redoEdit();
+          else undoEdit();
           return;
         }
         if (e.key === "0")            { zoom100(); e.preventDefault(); return; }
@@ -837,10 +1122,10 @@ export default function Editor({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [
-    selectedId, deleteAnnotation, pending, pendingFrameMs, comments, redoStack,
+    selectedId, deleteAnnotation,
     showShortcuts, togglePlay, shuttle, stepFrame, toggleFullscreen,
     cycleGuide, toggleMute, toggleLoop, zoomFit, zoomFill, zoomIn, zoomOut, zoom100,
-    focusComposer, goToIn, goToOut, markIn, markOut, markRange,
+    focusComposer, goToIn, goToOut, markIn, markOut, markRange, redoEdit, undoEdit,
   ]);
 
   // ── Toolbar grip drag ──────────────────────────────────────────────────
@@ -881,7 +1166,7 @@ export default function Editor({
   const finish = async () => {
     const out: ReviewPayload = {
       ...payload, status, comments,
-      summaryText: summarize(comments, status, payload.mediaTitle, reviewerName),
+      summaryText: summarize(comments, status, activeMediaTitle, reviewerName),
     };
 
     // ── Server-backed (the single live link) ──
@@ -890,13 +1175,21 @@ export default function Editor({
     // state (status flipped) and shows that same link. Notifying the creator
     // is the Apollo side's job (see CONTRACT.md), not ClickUp from here.
     if (session && WORKER_URL) {
+      // A pending autosave would run after /session/conclude and reopen the
+      // review. Cancel it so conclusion remains the last server write.
+      if (saveTimerRef.current !== null) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
       try {
-        await saveSession({
+        await concludeSession({
           reviewId: session.reviewId,
-          versionId: session.versionId,
+          versionId: selectedVersionId,
           status,
           comments,
         });
+        lastPersistedReviewFingerprints.current[selectedVersionId] =
+          reviewStateFingerprint(status, comments);
         setSaveState("saved");
       } catch {
         setSaveState("error");
@@ -921,6 +1214,16 @@ export default function Editor({
     return arr;
   }, [comments, timed]);
 
+  const activeTimedCommentId = useMemo(() => {
+    if (!timed) return null;
+    return ordered.find((c) => commentIsActiveAtMs(c, currentMs))?.id ?? null;
+  }, [currentMs, ordered, timed]);
+
+  useEffect(() => {
+    if (!timed) return;
+    setSelectedCommentId(activeTimedCommentId);
+  }, [activeTimedCommentId, timed]);
+
   // ── Interactive overlay data ───────────────────────────────────────────
   // Only show annotations anchored to the current frame (video) or
   // the current asset (image / document). Without this filter, every
@@ -934,7 +1237,7 @@ export default function Editor({
         // ±~one frame (~50 ms) tolerance; same idea as the Swift
         // `annotationsToShow` heuristic. Without fps metadata in the
         // web payload, 50 ms is a sane default for typical 24–30 fps.
-        if (Math.abs(c.anchor.timeMs - currentMs) <= 50) out.push(...c.annotations);
+        if (commentIsActiveAtMs(c, currentMs)) out.push(...c.annotations);
       } else if (c.anchor.kind === "image" || c.anchor.kind === "general") {
         out.push(...c.annotations);
       } else if (c.anchor.kind === "document") {
@@ -970,29 +1273,64 @@ export default function Editor({
       <header className="vw-header">
         <div className="vw-title">
           <div className="vw-brandrow">
-            <span className="vw-brand">Apollo Review · editar</span>
-            {payload.mediaUrl && (
-              <a
-                className="vw-dl"
-                href={payload.mediaUrl}
-                download={payload.mediaTitle || ""}
-                target="_blank"
-                rel="noopener noreferrer"
-                title="Baixar arquivo"
-                aria-label="Baixar arquivo"
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" strokeWidth="2.2"
-                     strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <line x1="12" y1="15" x2="12" y2="3" />
-                </svg>
-                Baixar
-              </a>
-            )}
+            <span className="vw-brand">
+              <svg className="vw-brand-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M12 3.5 13.8 9l5.7 1.8-5.7 1.9L12 18.5l-1.8-5.8-5.7-1.9L10.2 9 12 3.5Z"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.9"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M19 3.8v3.4M17.3 5.5h3.4"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.7"
+                  strokeLinecap="round"
+                />
+              </svg>
+              Review
+            </span>
           </div>
-          <h1>{payload.mediaTitle || "Review"}</h1>
+          {/* Seletor de versão ANTES do título (20/jul): a versão é o
+              contexto que qualifica o nome do arquivo. */}
+          {(session?.versions?.length ?? 0) > 1 && (
+            <div className="vw-version-picker" aria-label="Versão exibida">
+              {session!.versions!.map((version) => (
+                <button
+                  key={version.versionId}
+                  type="button"
+                  className={version.versionId === selectedVersionId ? "is-active" : ""}
+                  onClick={() => void selectVersion(version.versionId)}
+                  title={version.mediaTitle}
+                >
+                  {version.versionId.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          )}
+          <h1>{activeMediaTitle || "Review"}</h1>
+          {activeMediaUrl && (
+            <a
+              className="vw-dl"
+              href={activeMediaUrl}
+              download={activeMediaTitle || ""}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Baixar arquivo"
+              aria-label="Baixar arquivo"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" strokeWidth="2.2"
+                   strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              Baixar
+            </a>
+          )}
         </div>
         <div className="ed-statuswrap">
           {readOnly ? (
@@ -1003,9 +1341,21 @@ export default function Editor({
             </span>
           ) : (
             <>
-              <select className="ed-status" value={status} onChange={(e) => setStatus(e.target.value)}>
-                {STATUSES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
-              </select>
+              <button
+                type="button"
+                className={`ed-approval-toggle${status === "approved" ? " on" : ""}`}
+                role="switch"
+                aria-checked={status === "approved"}
+                onClick={toggleApproval}
+                title={status === "approved" ? "Marcar como em revisão" : "Marcar como aprovado"}
+              >
+                <span className="ed-approval-track" aria-hidden="true">
+                  <span className="ed-approval-thumb" />
+                </span>
+                <span className="ed-approval-label">
+                  {status === "approved" ? "Aprovado" : "Em revisão"}
+                </span>
+              </button>
               <button className="ed-finish" onClick={finish}>Concluir review</button>
             </>
           )}
@@ -1033,7 +1383,7 @@ export default function Editor({
                 {TOOLS.map((t) => (
                   <button key={t.id} className={`ed-tool${tool === t.id ? " on" : ""}`}
                           title={t.label} onClick={() => setTool(t.id)}>
-                    <span className="ed-glyph">{t.glyph}</span>
+                    {t.icon === "pointer" ? <ToolPointerIcon /> : <span className="ed-glyph">{t.glyph}</span>}
                   </button>
                 ))}
                 <div className="ed-sep" />
@@ -1070,14 +1420,15 @@ export default function Editor({
               }}
             >
               {kind === "video" && (
-                <div className="vw-media-wrap">
-                  <video ref={videoRef} className="vw-media" src={payload.mediaUrl} playsInline
+                <div className="vw-media-wrap" style={mediaBoxStyle}>
+                  <video key={selectedVersionId} ref={videoRef} className="vw-media" src={activeMediaUrl} playsInline
                          onTimeUpdate={(e) => setCurrentMs(Math.round(e.currentTarget.currentTime * 1000))}
                          onLoadedMetadata={(e) => {
-                           setMediaLoading(false);
+                           rememberMediaSize(e.currentTarget);
                            setDurationMs(Math.round(e.currentTarget.duration * 1000) || 0);
                            redraw();
                          }}
+                         onLoadedData={() => setMediaLoading(false)}
                          onWaiting={() => setMediaLoading(true)}
                          onCanPlay={() => setMediaLoading(false)}
                          onPlay={() => setIsPlaying(true)}
@@ -1089,19 +1440,13 @@ export default function Editor({
                            void v.play();
                          }}
                          onError={() => setMediaLoading(false)} />
-                  {mediaLoading && (
-                    <div className="ed-loading" aria-live="polite">
-                      <span className="ed-spinner" />
-                      <span className="ed-loading-text">Carregando vídeo…</span>
-                    </div>
-                  )}
                   <canvas ref={canvasRef} className="vw-overlay ed-canvas"
                           style={{ pointerEvents: readOnly ? "none" : "auto",
                                    cursor: tool === "select" ? "default" : "crosshair" }}
                           onPointerDown={onPointerDown}
                           onPointerMove={onPointerMove}
                           onPointerUp={onPointerUp} />
-                  <AspectGuideOverlay guide={guide} />
+                  <AspectGuideOverlay guide={guide} rect={stageRect} />
                   {stageRect && (
                     <>
                       <ShapeHitLayer
@@ -1111,6 +1456,7 @@ export default function Editor({
                         selectedId={selectedId}
                         readOnly={readOnly}
                         onSelect={setSelectedId}
+                        onEditStart={pushUndoSnapshot}
                         onMove={(id, dx, dy) => updateAnnotation(id, (a) => translateAnnotation(a, dx, dy))}
                         onResize={(id, h, dx, dy) => updateAnnotation(id, (a) => resizeAnnotation(a, h, dx, dy))}
                       />
@@ -1121,6 +1467,7 @@ export default function Editor({
                         tool={tool}
                         readOnly={readOnly}
                         onSelect={setSelectedId}
+                        onEditStart={pushUndoSnapshot}
                         onUpdate={(id, geom) =>
                           updateAnnotation(id, (a) => ({ ...a, geom }))
                         }
@@ -1131,15 +1478,25 @@ export default function Editor({
                 </div>
               )}
               {kind === "image" && (
-                <div className="vw-media-wrap">
-                  <img ref={imgRef} className="vw-media" src={payload.mediaUrl} alt={payload.mediaTitle} onLoad={redraw} />
+                <div className="vw-media-wrap" style={mediaBoxStyle}>
+                  <img
+                    key={selectedVersionId}
+                    ref={imgRef}
+                    className="vw-media"
+                    src={activeMediaUrl}
+                    alt={activeMediaTitle}
+                    onLoad={(e) => {
+                      rememberMediaSize(e.currentTarget);
+                      redraw();
+                    }}
+                  />
                   <canvas ref={canvasRef} className="vw-overlay ed-canvas"
                           style={{ pointerEvents: readOnly ? "none" : "auto",
                                    cursor: tool === "select" ? "default" : "crosshair" }}
                           onPointerDown={onPointerDown}
                           onPointerMove={onPointerMove}
                           onPointerUp={onPointerUp} />
-                  <AspectGuideOverlay guide={guide} />
+                  <AspectGuideOverlay guide={guide} rect={stageRect} />
                   {stageRect && (
                     <>
                       <ShapeHitLayer
@@ -1149,6 +1506,7 @@ export default function Editor({
                         selectedId={selectedId}
                         readOnly={readOnly}
                         onSelect={setSelectedId}
+                        onEditStart={pushUndoSnapshot}
                         onMove={(id, dx, dy) => updateAnnotation(id, (a) => translateAnnotation(a, dx, dy))}
                         onResize={(id, h, dx, dy) => updateAnnotation(id, (a) => resizeAnnotation(a, h, dx, dy))}
                       />
@@ -1159,6 +1517,7 @@ export default function Editor({
                         tool={tool}
                         readOnly={readOnly}
                         onSelect={setSelectedId}
+                        onEditStart={pushUndoSnapshot}
                         onUpdate={(id, geom) =>
                           updateAnnotation(id, (a) => ({ ...a, geom }))
                         }
@@ -1170,7 +1529,7 @@ export default function Editor({
               )}
               {kind === "audio" && (
                 <div className="vw-media-wrap vw-audio-wrap">
-                  <video ref={videoRef} className="vw-media vw-audio-media" src={payload.mediaUrl} playsInline
+                  <video key={selectedVersionId} ref={videoRef} className="vw-media vw-audio-media" src={activeMediaUrl} playsInline
                          onTimeUpdate={(e) => setCurrentMs(Math.round(e.currentTarget.currentTime * 1000))}
                          onLoadedMetadata={(e) => {
                            setMediaLoading(false);
@@ -1185,16 +1544,17 @@ export default function Editor({
                            void v.play();
                          }} />
                   <div className="vw-audio-card">
-                    <div className="vw-audio-name">{payload.mediaTitle}</div>
+                    <div className="vw-audio-name">{activeMediaTitle}</div>
                     <p className="vw-muted">Áudio — sem canvas de marcação visual.</p>
                   </div>
                 </div>
               )}
               {kind !== "video" && kind !== "image" && kind !== "audio" && (
-                <div className="vw-audio"><div className="vw-audio-name">{payload.mediaTitle}</div>
+                <div className="vw-audio"><div className="vw-audio-name">{activeMediaTitle}</div>
                   <p className="vw-muted">Formato não suportado nesta versão do review.</p></div>
               )}
             </div>
+            {splashVisible && <MediaSplash leaving={splashLeaving} />}
           </div>
 
           {/* Custom transport bar — replaces the native HTML5 controls so
@@ -1265,7 +1625,7 @@ export default function Editor({
               )}
               {ordered.map((c) => (
                 <div
-                  className={`vw-comment${selectedCommentId === c.id ? " is-selected" : ""}${c.resolved ? " is-resolved" : ""}`}
+                  className={`vw-comment${selectedCommentId === c.id ? " is-selected" : ""}${c.resolved ? " is-resolved" : ""}${deletingCommentIds.has(c.id) ? " is-deleting" : ""}`}
                   key={c.id}
                 >
                   {/* Resolve checkbox — the executor ticks each feedback item
@@ -1293,6 +1653,25 @@ export default function Editor({
                     </div>
                     <div className="vw-comment-body">{c.body || <em>(marcação)</em>}</div>
                   </button>
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      className="vw-comment-delete"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteComment(c.id);
+                      }}
+                      aria-label="Deletar comentário"
+                      title="Deletar comentário"
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true">
+                        <path d="M5.2 4.2V3.3c0-.7.5-1.2 1.2-1.2h3.2c.7 0 1.2.5 1.2 1.2v.9" />
+                        <path d="M3.4 4.2h9.2" />
+                        <path d="M4.5 6.1 5 13c0 .6.5 1 1.1 1h3.8c.6 0 1.1-.4 1.1-1l.5-6.9" />
+                        <path d="M7 7.1v4.5M9 7.1v4.5" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -1301,32 +1680,28 @@ export default function Editor({
                 the bordered rounded box, Apollo-style: the whole row
                 reads as one input. Hidden in read-only. */}
             {!readOnly && (
-              <div className="ed-composer">
-                {/* Reviewer identification row. The proxy posts to ClickUp
-                    via the workspace owner's API token, so the visible
-                    ClickUp byline is always the owner — but every saved
-                    comment + the posted summary stamp this name so the
-                    actual reviewer is preserved. Persisted to localStorage. */}
-                <div className="ed-reviewer-row">
-                  <span className="ed-reviewer-label">Você é:</span>
-                  <input
-                    type="text"
-                    className="ed-reviewer-input"
-                    placeholder="seu nome (obrigatório p/ comentar)"
-                    value={reviewerName}
-                    onChange={(e) => setReviewerName(e.target.value)}
-                    spellCheck={false}
-                    autoComplete="off"
-                  />
-                </div>
+              <div
+                className="ed-composer"
+                onPointerDown={(e) => {
+                  if (reviewerReady) return;
+                  e.preventDefault();
+                  requestReviewerName();
+                }}
+              >
                 <div className="ed-composer-row">
                   <textarea
                     ref={composerRef}
                     className="ed-text"
-                    placeholder={reviewerReady ? "Comentar…" : "Identifique-se acima para comentar…"}
+                    placeholder="Comentar…"
                     value={body}
                     onChange={(e) => setBody(e.target.value)}
-                    disabled={!reviewerReady}
+                    readOnly={!reviewerReady}
+                    onFocus={() => {
+                      if (!reviewerReady) {
+                        composerRef.current?.blur();
+                        requestReviewerName();
+                      }
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
@@ -1353,12 +1728,10 @@ export default function Editor({
                       type="button"
                       className="ed-add ed-add-compact"
                       onClick={addComment}
-                      disabled={!reviewerReady || (!body.trim() && pending.length === 0)}
+                      disabled={reviewerReady && !body.trim() && pending.length === 0}
                       title="Adicionar comentário (Enter)"
                     >
-                      {(inMs !== null && outMs !== null && outMs > inMs)
-                        ? `${fmt(inMs)}–${fmt(outMs)}`
-                        : fmt(pendingFrameMs ?? currentMs)}
+                      Comentar
                     </button>
                   </div>
                 </div>
@@ -1381,14 +1754,60 @@ export default function Editor({
         <ShortcutsOverlay onClose={() => setShowShortcuts(false)} />
       )}
 
+      {nameDialogOpen && (
+        <div className="ed-modal ed-name-modal">
+          <form
+            className="ed-modal-card ed-name-card"
+            onSubmit={(e) => {
+              e.preventDefault();
+              confirmReviewerName();
+            }}
+          >
+            <span className="vw-brand">Identificação</span>
+            <p className="vw-muted">Informe seu nome para comentar neste review.</p>
+            <input
+              ref={nameInputRef}
+              className="ed-name-input"
+              type="text"
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              placeholder="Seu nome"
+              autoComplete="name"
+              spellCheck={false}
+            />
+            <div className="ed-modal-actions">
+              <button
+                type="button"
+                className="ed-clear"
+                onClick={() => setNameDialogOpen(false)}
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                className="ed-add ed-name-submit"
+                disabled={!nameDraft.trim()}
+              >
+                Continuar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {done !== null && (
-        <div className="ed-modal" onClick={() => setDone(null)}>
-          <div className="ed-modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="ed-modal ed-done-modal" onClick={() => setDone(null)}>
+          <div className="ed-modal-card ed-done-card" onClick={(e) => e.stopPropagation()}>
+            <div className="ed-done-mark" aria-hidden="true">
+              <svg viewBox="0 0 48 48">
+                <path d="M14 24.5 21.2 31.6 35 16.8" />
+              </svg>
+            </div>
             <span className="vw-brand">Review concluído</span>
             {session ? (
               // Single live link: it's the same URL, already in the task as the
               // REVIEW button — nothing to copy.
-              <p className="vw-muted">✓ Tudo salvo neste mesmo link. Quem abrir o REVIEW na task vê a versão atual.</p>
+              <p className="vw-muted">Tudo salvo neste mesmo link. Quem abrir o REVIEW na task vê a versão atual.</p>
             ) : (
               <>
                 <p className="vw-muted">Copie este link para compartilhar o review:</p>
@@ -1408,60 +1827,69 @@ export default function Editor({
   );
 }
 
+function MediaSplash({ leaving }: { leaving: boolean }) {
+  return (
+    <div
+      className={`ed-loading ed-media-splash${leaving ? " is-leaving" : ""}`}
+      aria-label="Carregando video"
+      aria-live="polite"
+    >
+      <div className="ed-splash-mark" aria-hidden="true">
+        <span className="ed-splash-orbit" />
+        <svg className="ed-splash-star" viewBox="0 0 32 32">
+          <path
+            d="M16 4.5 18.8 13l8.7 3-8.7 3L16 27.5 13.2 19l-8.7-3 8.7-3L16 4.5Z"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M25 4.8v4.4M22.8 7h4.4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+          />
+        </svg>
+      </div>
+      <div className="ed-splash-wordmark">
+        <span>Apollo</span>
+        <strong>Review</strong>
+      </div>
+      <div className="ed-splash-progress" aria-hidden="true">
+        <span />
+      </div>
+    </div>
+  );
+}
+
 // ── Aspect-ratio guides overlay ─────────────────────────────────────────
 //
 // Centred outline of the named ratio (9:16, 1:1, 4:5, 16:9, 2.39) inside
 // the displayed media rect. Matches GuideOverlay in the Swift app — the
 // rectangle is the WIDER axis pinned to the shorter side of the stage.
 
-function AspectGuideOverlay({ guide }: { guide: Guide }) {
+function AspectGuideOverlay({ guide, rect }: { guide: Guide; rect: Rect | null }) {
   const g = GUIDES.find((x) => x.id === guide);
-  if (!g || g.ratio === null) return null;
-  // Compute the inset on the longer axis as a percentage so it scales
-  // with the parent rect (which is itself aspect-fit inside the box).
-  // We don't have direct access to the parent rect dims here, but
-  // SVG with viewBox 0 0 100 100 + preserveAspectRatio="none" gives a
-  // matched stretching effect.
+  if (!g || g.ratio === null || !rect || rect.w <= 0 || rect.h <= 0) return null;
+
+  const mediaAspect = rect.w / rect.h;
+  const guideAspect = g.ratio;
+  const guideW = guideAspect > mediaAspect ? rect.w : rect.h * guideAspect;
+  const guideH = guideAspect > mediaAspect ? rect.w / guideAspect : rect.h;
+  const left = rect.x + (rect.w - guideW) / 2;
+  const top = rect.y + (rect.h - guideH) / 2;
+
   return (
-    <svg className="ed-guide-svg" viewBox="0 0 100 100" preserveAspectRatio="none"
-         style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
-                  pointerEvents: "none" }}>
-      {/* outer dim */}
-      <rect x="0" y="0" width="100" height="100" fill="rgba(20,19,15,0.18)" />
-      {/* inner cut-out is drawn by the rect below acting as inverse-mask via stroke */}
-      <rect x="0" y="0" width="100" height="100" fill="white" mask="url(#ed-guide-mask)" opacity="0" />
-      <defs>
-        <mask id="ed-guide-mask">
-          <rect x="0" y="0" width="100" height="100" fill="white" />
-        </mask>
-      </defs>
-      {/* outline */}
-      <GuideRect ratio={g.ratio} />
-    </svg>
+    <div className="ed-guide-svg" aria-hidden="true">
+      <div
+        className="ed-guide-rect"
+        style={{ left, top, width: guideW, height: guideH }}
+      />
+    </div>
   );
 }
-
-function GuideRect({ ratio }: { ratio: number }) {
-  // We're using viewBox 0..100. We don't know the actual aspect of the
-  // host rect from inside the SVG, so we approximate by drawing the
-  // crop rectangle for a 16:9 reference frame and rely on parent's
-  // preserveAspectRatio="none" stretching to the media. Compute against
-  // the assumed-16:9 aspect: most reviewed media is wider than tall.
-  const stage = 16 / 9; // assumption — accurate enough for guide UX
-  let rectW = 100, rectH = 100;
-  if (ratio < stage) { rectW = 100 * (ratio / stage); }
-  else                { rectH = 100 * (stage / ratio); }
-  const x = (100 - rectW) / 2;
-  const y = (100 - rectH) / 2;
-  return (
-    <rect
-      x={x} y={y} width={rectW} height={rectH}
-      fill="none" stroke="#F8F6F3" strokeOpacity={0.92} strokeWidth={0.4}
-      strokeDasharray="2 1.5"
-    />
-  );
-}
-
 // ── Custom transport bar ────────────────────────────────────────────────
 //
 // Below the stage. Play/pause + timecode + scrubber with comment markers
@@ -1634,6 +2062,27 @@ function TransportBar({
 // Inline SVG paths chosen to read like Apollo's SF-symbols set (filled
 // triangles, single-bar step-frame, simple loop/aspect/speaker). Stroke
 // inherits the button's `color`, so the on-state highlight just works.
+
+function ToolPointerIcon() {
+  return (
+    <svg className="ed-tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M5.2 3.6 18.7 13a.8.8 0 0 1-.46 1.46h-6.02l-3.1 5.56a.8.8 0 0 1-1.48-.38L4 4.35a.8.8 0 0 1 1.2-.75Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M10.9 13.4 8.5 18"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 
 type IconName =
   | "play" | "pause"
@@ -1826,7 +2275,7 @@ function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
 // win for hit-testing).
 
 function ShapeHitLayer({
-  annotations, rect, tool, selectedId, readOnly, onSelect, onMove, onResize,
+  annotations, rect, tool, selectedId, readOnly, onSelect, onEditStart, onMove, onResize,
 }: {
   annotations: Annotation[];
   rect: Rect;
@@ -1834,6 +2283,7 @@ function ShapeHitLayer({
   selectedId: string | null;
   readOnly?: boolean;
   onSelect: (id: string | null) => void;
+  onEditStart: () => void;
   onMove: (id: string, dx: number, dy: number) => void;
   onResize: (id: string, handle: ShapeHandle, dx: number, dy: number) => void;
 }) {
@@ -1865,8 +2315,13 @@ function ShapeHitLayer({
               onSelect(a.id);
               const startX = e.clientX, startY = e.clientY;
               let lastDx = 0, lastDy = 0;
+              let recorded = false;
               const move = (ev: PointerEvent) => {
                 if (Math.hypot(ev.clientX - startX, ev.clientY - startY) <= 2) return;
+                if (!recorded) {
+                  onEditStart();
+                  recorded = true;
+                }
                 const totalDx = (ev.clientX - startX) / rect.w;
                 const totalDy = (ev.clientY - startY) / rect.h;
                 const dx = totalDx - lastDx;
@@ -1904,7 +2359,12 @@ function ShapeHitLayer({
               (e.target as Element).setPointerCapture(e.pointerId);
               const startX = e.clientX, startY = e.clientY;
               let lastDx = 0, lastDy = 0;
+              let recorded = false;
               const move = (ev: PointerEvent) => {
+                if (!recorded) {
+                  onEditStart();
+                  recorded = true;
+                }
                 const totalDx = (ev.clientX - startX) / rect.w;
                 const totalDy = (ev.clientY - startY) / rect.h;
                 const dx = totalDx - lastDx;
@@ -1994,7 +2454,7 @@ function resizeAnnotation(a: Annotation, h: ShapeHandle, dx: number, dy: number)
 // is actually editable and the tail's drag handle has its own hit area.
 
 function TextBoxLayer({
-  annotations, rect, selectedId, tool, readOnly, onSelect, onUpdate, onDelete,
+  annotations, rect, selectedId, tool, readOnly, onSelect, onEditStart, onUpdate, onDelete,
 }: {
   annotations: Annotation[];
   rect: Rect;
@@ -2002,6 +2462,7 @@ function TextBoxLayer({
   tool: Tool;
   readOnly?: boolean;
   onSelect: (id: string | null) => void;
+  onEditStart: () => void;
   onUpdate: (id: string, geom: TextBoxGeom) => void;
   onDelete: (id: string) => void;
 }) {
@@ -2019,6 +2480,7 @@ function TextBoxLayer({
             tool={tool}
             readOnly={readOnly}
             onSelect={() => onSelect(a.id)}
+            onEditStart={onEditStart}
             onUpdate={(g) => onUpdate(a.id, g)}
             onDelete={() => onDelete(a.id)}
           />
@@ -2029,7 +2491,7 @@ function TextBoxLayer({
 }
 
 function EditableTextBox({
-  geom, rect, isSelected, tool, readOnly = false, onSelect, onUpdate, onDelete,
+  geom, rect, isSelected, tool, readOnly = false, onSelect, onEditStart, onUpdate, onDelete,
 }: {
   annotation: Annotation;
   geom: TextBoxGeom;
@@ -2038,6 +2500,7 @@ function EditableTextBox({
   tool: Tool;
   readOnly?: boolean;
   onSelect: () => void;
+  onEditStart: () => void;
   onUpdate: (g: TextBoxGeom) => void;
   onDelete: () => void;
 }) {
@@ -2087,6 +2550,7 @@ function EditableTextBox({
 
   const enterEdit = () => {
     onSelect();
+    onEditStart();
     setIsEditing(true);
   };
 
@@ -2115,7 +2579,12 @@ function EditableTextBox({
     (e.target as Element).setPointerCapture(e.pointerId);
     const startX = e.clientX, startY = e.clientY;
     const startG = { ...geom };
+    let recorded = false;
     const move = (ev: PointerEvent) => {
+      if (!recorded) {
+        onEditStart();
+        recorded = true;
+      }
       const ndx = (ev.clientX - startX) / rect.w;
       const ndy = (ev.clientY - startY) / rect.h;
       onUpdate({
@@ -2141,7 +2610,12 @@ function EditableTextBox({
     (e.target as Element).setPointerCapture(e.pointerId);
     const startX = e.clientX, startY = e.clientY;
     const startG = { ...geom };
+    let recorded = false;
     const move = (ev: PointerEvent) => {
+      if (!recorded) {
+        onEditStart();
+        recorded = true;
+      }
       const nw = Math.max(0.10, startG.w + (ev.clientX - startX) / rect.w);
       const nh = Math.max(0.06, startG.h + (ev.clientY - startY) / rect.h);
       onUpdate({
@@ -2165,7 +2639,12 @@ function EditableTextBox({
     (e.target as Element).setPointerCapture(e.pointerId);
     const startX = e.clientX, startY = e.clientY;
     const startG = { ...geom };
+    let recorded = false;
     const move = (ev: PointerEvent) => {
+      if (!recorded) {
+        onEditStart();
+        recorded = true;
+      }
       onUpdate({
         ...startG,
         tailX: clamp(startG.tailX + (ev.clientX - startX) / rect.w, 0, 1),
@@ -2182,7 +2661,7 @@ function EditableTextBox({
 
   return (
     <>
-      {/* Tail SVG — behind the box. Filled with cream so the box's
+      {/* Tail SVG — behind the box. Filled with the bubble surface so the box's
           bottom edge crossing the base of the triangle is masked. */}
       <svg
         className="ed-tb-tail"
@@ -2295,6 +2774,73 @@ function clamp(v: number, lo: number, hi: number) {
   return Math.min(Math.max(v, lo), hi);
 }
 
+function positiveSize(v: unknown): number | null {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function initialVersionStates(
+  session: SessionContext | undefined,
+  payload: ReviewPayload,
+  initialVersionId: string,
+): Record<string, ReviewVersionState> {
+  const states: Record<string, ReviewVersionState> = {};
+  for (const [versionId, state] of Object.entries(session?.versionStates ?? {})) {
+    states[versionId] = {
+      ...state,
+      comments: cloneComments(state.comments ?? []),
+    };
+  }
+  if (!states[initialVersionId]) {
+    states[initialVersionId] = {
+      status: payload.status || "in_review",
+      comments: cloneComments(payload.comments ?? []),
+    };
+  }
+  return states;
+}
+
+function cloneComments(comments: ReviewComment[]): ReviewComment[] {
+  return comments.map((c) => ({
+    ...c,
+    anchor: { ...c.anchor } as ReviewComment["anchor"],
+    annotations: cloneAnnotations(c.annotations),
+  }));
+}
+
+function cloneAnnotations(annotations: Annotation[]): Annotation[] {
+  return annotations.map((a) => ({
+    ...a,
+    geom: cloneGeom(a.geom),
+  }));
+}
+
+function cloneGeom(g: AnnotationGeom): AnnotationGeom {
+  switch (g.shape) {
+    case "rect":
+    case "ellipse":
+      return { shape: g.shape, x: g.x, y: g.y, w: g.w, h: g.h };
+    case "arrow":
+    case "line":
+      return { shape: g.shape, x1: g.x1, y1: g.y1, x2: g.x2, y2: g.y2 };
+    case "freehand":
+      return { shape: "freehand", points: g.points.map((p) => ({ ...p })) };
+    case "text":
+      return { shape: "text", x: g.x, y: g.y, text: g.text };
+    case "textBox":
+      return {
+        shape: "textBox",
+        x: g.x,
+        y: g.y,
+        w: g.w,
+        h: g.h,
+        text: g.text,
+        tailX: g.tailX,
+        tailY: g.tailY,
+      };
+  }
+}
+
 function notTextBox(a: Annotation): boolean {
   return a.geom.shape !== "textBox";
 }
@@ -2341,9 +2887,15 @@ function anchorMs(c: ReviewComment): number {
   return c.anchor.kind === "video" ? c.anchor.timeMs : Number.MAX_SAFE_INTEGER;
 }
 
-function fmt(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+function commentIsActiveAtMs(c: ReviewComment, currentMs: number): boolean {
+  if (c.anchor.kind !== "video") return false;
+  const toleranceMs = 50;
+  const start = c.anchor.timeMs;
+  const end = c.anchor.endMs;
+  if (typeof end === "number" && end > start) {
+    return currentMs >= start - toleranceMs && currentMs <= end + toleranceMs;
+  }
+  return Math.abs(start - currentMs) <= toleranceMs;
 }
 
 function summarize(
