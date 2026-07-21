@@ -14,6 +14,7 @@ import {
   type ReviewVersionState,
   type SessionContext,
 } from "../contract/session";
+import { LinkifiedCommentText } from "./LinkifiedCommentText";
 
 // ── Tools / palette / status ────────────────────────────────────────────
 //
@@ -1645,14 +1646,27 @@ export default function Editor({
                   >
                     {c.resolved ? "✓" : ""}
                   </button>
-                  <button className="vw-comment-main" onClick={() => seek(c)}>
+                  <div
+                    className="vw-comment-main"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => seek(c)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        seek(c);
+                      }
+                    }}
+                  >
                     <div className="vw-comment-meta">
                       {c.anchor.kind === "video" && <span className="vw-stamp">{anchorLabel(c)}</span>}
                       <span className="vw-author">{c.authorName}</span>
                       {c.annotations.length > 0 && <span className="vw-markup">✎</span>}
                     </div>
-                    <div className="vw-comment-body">{c.body || <em>(marcação)</em>}</div>
-                  </button>
+                    <div className="vw-comment-body">
+                      {c.body ? <LinkifiedCommentText text={c.body} /> : <em>(marcação)</em>}
+                    </div>
+                  </div>
                   {!readOnly && (
                     <button
                       type="button"

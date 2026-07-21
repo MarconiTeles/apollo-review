@@ -15,9 +15,10 @@ Antes havia dois links:
 - **Ver revisão** → `?z=<payload comprimido>` carregava o review *dentro da URL*
   (imutável: o conteúdo **é** o link).
 
-Agora há **um só**. A identidade estável é o **anexo do ClickUp** (o
-`attachmentId` é também o `reviewId`). O link resolve para o blob KV
-`review:<attachmentId>`, tanto para revisar quanto para ver:
+Agora há **um só**. Para reviews legadas, a identidade continua sendo o anexo
+original do ClickUp. Para o fluxo versionado, a identidade é a linhagem lógica
+do resultado e fica persistida como `reviewId`; V1/V2/V3 são anexos diferentes
+dentro do mesmo blob `review:<reviewId>`. O link original permanece válido.
 
 ```
 https://<web>/?att=<attachmentId>&task=<taskId>&m=<mediaUrl>&t=<title>&x=<ext>
@@ -39,7 +40,7 @@ Parâmetros (todos do lado Apollo, identidade = ClickUp):
 
 | Param   | Origem                              | Obrigatório |
 |---------|-------------------------------------|-------------|
-| `att`   | `Attachment.id`                     | sim         |
+| `att`   | `reviewId` estável (anexo V1 no legado) | sim      |
 | `task`  | task do anexo                       | sim         |
 | `m`     | URL do anexo (mídia)                | sim         |
 | `t`     | título do arquivo                   | recomendado |
@@ -59,12 +60,14 @@ com o KV nem com o ClickUp.
 
 | Rota                | Quando                          | Efeito |
 |---------------------|---------------------------------|--------|
-| `/session/resolve`  | ao abrir o link                 | load-or-create do review por anexo, devolve o review vivo |
+| `/session/resolve`  | ao abrir o link                 | load-or-create do review estável, devolve mídia atual e versões |
 | `/session/save`     | a cada mudança (debounce 800ms) | persiste status + comentários + marcações (blob inteiro) |
-| `/session/conclude` | ao "Concluir review"            | grava status e posta **uma** comment no ClickUp; nas próximas vezes **edita a mesma** (`clickupCommentId` no blob) |
+| `/session/conclude` | ao "Concluir review"            | registra conclusão explícita, separada do status aprovado |
+| `/session/version`  | ao substituir uma mídia         | adiciona V2/V3 ao mesmo review, preservando histórico e comentários |
 
-O estado é **um blob JSON por anexo no Cloudflare KV** (chave
-`review:<attachmentId>`), sem banco externo. `status` ∈
+O estado é **um blob JSON por review lógico no Cloudflare KV** (chave
+`review:<reviewId>`), sem banco externo. Blobs antigos sem `versions` são
+interpretados como V1 sem migração destrutiva. `status` ∈
 `in_review | changes_requested | approved`. Cada comentário tem
 `resolved` + `resolvedByName` + `resolvedAt` (a checkbox).
 

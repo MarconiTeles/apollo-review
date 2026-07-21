@@ -16,7 +16,7 @@ export function drawAnnotations(ctx: CanvasRenderingContext2D, anns: Annotation[
 }
 
 function drawOne(ctx: CanvasRenderingContext2D, a: Annotation, r: Rect) {
-  const color = a.color || "#C7321B";
+  const color = a.color || "#7C5CFF";
   const lw = Math.max(1.5, (a.strokeWidth ?? 0.004) * r.w);
   ctx.strokeStyle = color;
   ctx.fillStyle = color;

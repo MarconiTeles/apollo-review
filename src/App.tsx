@@ -28,6 +28,8 @@ export default function App() {
     const ok = (payload: ReviewPayload, edit = false, session?: SessionContext) => {
       if (!cancelled) setState({ phase: "ready", payload, edit, session });
     };
+    const mediaWidth = numParam(p, "mediaWidth") ?? numParam(p, "width") ?? numParam(p, "w");
+    const mediaHeight = numParam(p, "mediaHeight") ?? numParam(p, "height") ?? numParam(p, "h");
     const fail = (e: unknown) => {
       if (!cancelled)
         setState({
@@ -61,18 +63,26 @@ export default function App() {
             {
               taskId: p.get("task") ?? "",
               attachmentId: att,
+              versionId: res.versionId,
               commentId: p.get("cmt") ?? null,
               uploaderId: p.get("up") ? Number(p.get("up")) : null,
               uploaderName: p.get("un") ?? null,
               status: res.status,
               summaryText: "",
-              mediaUrl: media,
-              ext,
-              mediaTitle: p.get("t") ?? "Arquivo",
+              mediaUrl: res.mediaUrl || media,
+              ext: res.ext || ext,
+              mediaTitle: res.mediaTitle || p.get("t") || "Arquivo",
+              mediaWidth,
+              mediaHeight,
               comments: res.comments,
             },
             true,
-            { reviewId: res.reviewId, versionId: res.versionId },
+            {
+              reviewId: res.reviewId,
+              versionId: res.versionId,
+              versions: res.versions,
+              versionStates: res.versionStates,
+            },
           ),
         )
         .catch(fail);
@@ -90,6 +100,8 @@ export default function App() {
           mediaUrl: media,
           ext: p.get("x") ?? media.split(".").pop() ?? "",
           mediaTitle: p.get("t") ?? "Arquivo",
+          mediaWidth,
+          mediaHeight,
           comments: [],
         },
         true,
@@ -137,4 +149,11 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+function numParam(params: URLSearchParams, key: string): number | null {
+  const raw = params.get(key);
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }

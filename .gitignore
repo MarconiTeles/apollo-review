@@ -30,3 +30,10 @@ public/sample.mov
 # Cloudflare API token used for deploy (never commit a credential)
 worker/.cf-token
 .cf-token
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example

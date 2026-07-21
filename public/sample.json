@@ -24,7 +24,7 @@
         {
           "id": "a1",
           "commentId": "c1",
-          "color": "#C7321B",
+          "color": "#7C5CFF",
           "strokeWidth": 0.004,
           "geom": { "shape": "rect", "x": 0.18, "y": 0.12, "w": 0.45, "h": 0.5 }
         }
@@ -46,7 +46,7 @@
         {
           "id": "a2",
           "commentId": "c2",
-          "color": "#C7321B",
+          "color": "#7C5CFF",
           "strokeWidth": 0.005,
           "geom": { "shape": "arrow", "x1": 0.2, "y1": 0.8, "x2": 0.6, "y2": 0.45 }
         }

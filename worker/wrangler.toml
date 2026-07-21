@@ -6,12 +6,20 @@ compatibility_date = "2026-05-25"
 # to multiple accounts.
 account_id = "8f69ef9e8e9d3ebcb21a975eb9ad4c4a"
 
-# Review state lives in Cloudflare KV — one JSON blob per attachment. No
-# external database, no extra account. The binding name `REVIEWS` is what the
-# Worker reads at runtime (env.REVIEWS).
+# Review state: D1 is the PRIMARY store (one row per review, whole JSON doc,
+# mirroring the KV key exactly). KV remains as read-fallback for not-yet-
+# migrated docs, as a write mirror during the transition (lossless rollback)
+# and as cold backup afterwards. If the DB binding is absent the Worker
+# degrades to the pure-KV behaviour — a misconfigured deploy breaks nothing.
+[[d1_databases]]
+binding = "DB"
+database_name = "apollo-review"
+database_id = "bd9ed433-9519-486d-bf3b-ed6184401537"
+migrations_dir = "migrations"
+
 [[kv_namespaces]]
 binding = "REVIEWS"
 id = "7df97f52ff4a44adb5350da248a25729"
 
-# No secrets needed — the backend is pure KV. Deploy with:
+# No secrets needed. Deploy with:
 #   npx wrangler deploy

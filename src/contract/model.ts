@@ -108,7 +108,7 @@ export type AnnotationGeom =
 export interface Annotation {
   id: string;
   commentId: string;
-  color: string; // hex, e.g. "#C7321B"
+  color: string; // hex, e.g. "#7C5CFF"
   strokeWidth: number; // in normalized units (× asset width)
   geom: AnnotationGeom;
 }

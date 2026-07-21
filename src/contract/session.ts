@@ -31,8 +31,33 @@ export interface ResolveParams {
 export interface ResolvedReview {
   reviewId: string;
   versionId: string;
+  currentVersionId?: string;
+  mediaUrl?: string;
+  mediaTitle?: string;
+  mediaKind?: MediaKind;
+  ext?: string;
+  versions?: ReviewMediaVersion[];
+  versionStates?: Record<string, ReviewVersionState>;
   status: string;
+  concludedAt?: string | null;
   comments: ReviewComment[];
+}
+
+export interface ReviewVersionState {
+  status: string;
+  concludedAt?: string | null;
+  comments: ReviewComment[];
+  updatedAt?: string | null;
+}
+
+export interface ReviewMediaVersion {
+  versionId: string;
+  attachmentId: string;
+  mediaUrl: string;
+  mediaTitle: string;
+  mediaKind: MediaKind;
+  ext?: string;
+  createdAt?: string;
 }
 
 /** What the Editor needs to read/write the server-backed review. Absent =
@@ -40,6 +65,8 @@ export interface ResolvedReview {
 export interface SessionContext {
   reviewId: string;
   versionId: string;
+  versions?: ReviewMediaVersion[];
+  versionStates?: Record<string, ReviewVersionState>;
 }
 
 /** Find-or-create the session and load its current comments. */
@@ -55,6 +82,31 @@ export async function saveSession(p: {
   comments: ReviewComment[];
 }): Promise<void> {
   await post("/session/save", p);
+}
+
+/** Persist the explicit "Concluir review" action. Approval remains separate. */
+export async function concludeSession(p: {
+  reviewId: string;
+  versionId: string;
+  status: string;
+  comments: ReviewComment[];
+}): Promise<void> {
+  await post("/session/conclude", p);
+}
+
+/** Registers a replacement file under an existing logical review. */
+export async function registerReviewVersion(p: {
+  reviewId: string;
+  versionId: string;
+  attachmentId: string;
+  mediaUrl: string;
+  mediaTitle: string;
+  mediaKind: MediaKind;
+  ext?: string;
+  taskId?: string;
+  uploaderId?: number | null;
+}): Promise<void> {
+  await post("/session/version", p);
 }
 
 async function post<T>(route: string, body: unknown): Promise<T> {

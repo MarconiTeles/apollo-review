@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { Annotation, ReviewComment } from "../contract/model";
 import { drawAnnotations, fitRect } from "./draw";
 import { anchorLabel, mediaKindFor, statusInfo, type ReviewPayload } from "./payload";
+import { LinkifiedCommentText } from "./LinkifiedCommentText";
 
 const POINT_TOLERANCE_MS = 350;
 
@@ -229,7 +230,18 @@ function CommentRow({
   const hasMarkup = comment.annotations.length > 0;
   return (
     <div className={`vw-comment${selected ? " is-selected" : ""}${comment.resolved ? " is-resolved" : ""}`}>
-      <button className="vw-comment-main" onClick={() => onSelect(comment)}>
+      <div
+        className="vw-comment-main"
+        role="button"
+        tabIndex={0}
+        onClick={() => onSelect(comment)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect(comment);
+          }
+        }}
+      >
         <div className="vw-comment-meta">
           {timed && label !== "—" ? (
             <span className="vw-stamp">{label}</span>
@@ -240,14 +252,16 @@ function CommentRow({
           {hasMarkup && <span className="vw-markup" title="tem marcação">✎</span>}
           {comment.resolved && <span className="vw-check" title="resolvido">✓</span>}
         </div>
-        <div className="vw-comment-body">{comment.body || <em>(marcação)</em>}</div>
-      </button>
+        <div className="vw-comment-body">
+          {comment.body ? <LinkifiedCommentText text={comment.body} /> : <em>(marcação)</em>}
+        </div>
+      </div>
       {replies.length > 0 && (
         <div className="vw-replies">
           {replies.map((r) => (
             <div className="vw-reply" key={r.id}>
               <span className="vw-author">{r.authorName || "Reviewer"}</span>
-              <span className="vw-comment-body">{r.body}</span>
+              <span className="vw-comment-body"><LinkifiedCommentText text={r.body} /></span>
             </div>
           ))}
         </div>

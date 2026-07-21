@@ -8,6 +8,7 @@ export interface ReviewPayload {
   taskId: string;
   listId?: string | null;
   attachmentId: string;
+  versionId?: string | null;
   commentId?: string | null;
   uploaderId?: number | null;
   uploaderName?: string | null; // for the @mention chip's fallback text
@@ -16,6 +17,12 @@ export interface ReviewPayload {
   mediaUrl: string;
   ext: string;
   mediaTitle: string;
+  /** Optional displayed media dimensions. Important for portrait MOV files
+   * whose encoded dimensions may not match their intended presentation. */
+  mediaWidth?: number | null;
+  mediaHeight?: number | null;
+  width?: number | null;
+  height?: number | null;
   comments: ReviewComment[];
 }
 
